@@ -1,0 +1,9 @@
+FROM confluentinc/cp-kafka-connect:7.8.0
+
+USER root
+
+ARG S3_CONNECTOR_VERSION=10.5.18
+
+RUN confluent-hub install --no-prompt "confluentinc/kafka-connect-s3:${S3_CONNECTOR_VERSION}"
+
+USER appuser

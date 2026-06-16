@@ -1,0 +1,185 @@
+name: pp-infra
+
+# 4 runtime containers: postgres | debezium (CDC Connect) | kafka | connect-s3
+# debezium/connect 와 cp-kafka-connect 는 env 규격이 달라 공통 anchor 로 묶을 수 없음
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pp-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      DEBEZIUM_USER: ${DEBEZIUM_USER:-debezium}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-change-me-debezium}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=4
+      - -c
+      - max_replication_slots=4
+      - -c
+      - wal_sender_timeout=0
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - pp-net
+
+  kafka:
+    image: apache/kafka:3.8.1
+    container_name: pp-kafka
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xmx512m -Xms512m}
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+    networks:
+      - pp-net
+
+  debezium:
+    image: debezium/connect:2.7
+    container_name: pp-debezium
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${CONNECT_CDC_PORT:-8083}:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: pp-connect-cdc
+      CONFIG_STORAGE_TOPIC: cdc_connect_configs
+      OFFSET_STORAGE_TOPIC: cdc_connect_offsets
+      STATUS_STORAGE_TOPIC: cdc_connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: debezium
+      CONNECT_REST_PORT: 8083
+      CONNECT_PLUGIN_PATH: /kafka/connect
+      KAFKA_HEAP_OPTS: ${CONNECT_CDC_HEAP_OPTS:--Xmx512m -Xms512m}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - pp-net
+
+  connect-s3:
+    build:
+      context: ./connect
+      dockerfile: Dockerfile.s3
+    image: pp-kafka-connect-s3:local
+    container_name: pp-connect-s3
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${CONNECT_S3_PORT:-8084}:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_GROUP_ID: pp-connect-s3
+      CONNECT_CONFIG_STORAGE_TOPIC: s3_connect_configs
+      CONNECT_OFFSET_STORAGE_TOPIC: s3_connect_offsets
+      CONNECT_STATUS_STORAGE_TOPIC: s3_connect_statuses
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect-s3
+      CONNECT_REST_PORT: 8083
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+      AWS_EC2_METADATA_DISABLED: "false"
+      KAFKA_HEAP_OPTS: ${CONNECT_S3_HEAP_OPTS:--Xmx512m -Xms512m}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - pp-net
+
+  connector-setup:
+    build:
+      context: ./connect
+      dockerfile: Dockerfile.setup
+    image: pp-connector-setup:local
+    container_name: pp-connector-setup
+    depends_on:
+      debezium:
+        condition: service_healthy
+      connect-s3:
+        condition: service_healthy
+    environment:
+      CONNECT_CDC_URL: http://debezium:8083
+      CONNECT_S3_URL: http://connect-s3:8083
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      DEBEZIUM_USER: ${DEBEZIUM_USER:-debezium}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-change-me-debezium}
+      TOPIC_PREFIX: ${TOPIC_PREFIX:-cdc}
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PREFIX: ${S3_PREFIX:-cdc/}
+      SETUP_MAX_RETRIES: ${SETUP_MAX_RETRIES:-5}
+      CONNECT_WAIT_TIMEOUT_SEC: ${CONNECT_WAIT_TIMEOUT_SEC:-300}
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-5}
+    volumes:
+      - ./scripts/register-connectors.sh:/register-connectors.sh:ro
+      - ./connectors:/connectors:ro
+    entrypoint: ["/bin/sh", "/register-connectors.sh"]
+    restart: on-failure:3
+    networks:
+      - pp-net
+
+volumes:
+  postgres_data:
+
+networks:
+  pp-net:
+    driver: bridge

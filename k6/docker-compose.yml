@@ -1,0 +1,25 @@
+name: pp-k6
+
+services:
+  k6:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pp-k6:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST:-host.docker.internal}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      VUS: ${VUS:-10}
+      DURATION: ${DURATION:-30s}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./scripts:/scripts:ro
+    profiles:
+      - load
