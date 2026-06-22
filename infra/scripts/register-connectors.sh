@@ -30,6 +30,13 @@ on_exit() {
 
 trap 'LAST_LINE=${LINENO:-?}; on_exit $?' EXIT # LINENO 출력을 위해 sh대신 bash로 변경
 
+is_retryable_http() {
+  case "$1" in
+    000|502|503|504) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 connect_is_ready() {
   url="$1"
   http_code="$(

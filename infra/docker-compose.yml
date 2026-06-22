@@ -67,7 +67,7 @@ services:
       - pp-net
 
   debezium:
-    image: debezium/connect:2.7
+    image: debezium/connect:2.7.3.Final
     container_name: pp-debezium
     restart: unless-stopped
     depends_on:
@@ -157,8 +157,6 @@ services:
     environment:
       CONNECT_CDC_URL: http://debezium:8083
       CONNECT_S3_URL: http://connect-s3:8083
-      POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       POSTGRES_DB: ${POSTGRES_DB:-app}
       DEBEZIUM_USER: ${DEBEZIUM_USER:-debezium}
       DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-change-me-debezium}

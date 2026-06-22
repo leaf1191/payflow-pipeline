@@ -31,4 +31,6 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         (1, 'user1@example.com', 'BRONZE'),
         (2, 'user2@example.com', 'SILVER'),
         (3, 'user3@example.com', 'GOLD');
+
+    CREATE PUBLICATION dbz_publication FOR TABLE users, transactions;
 EOSQL
