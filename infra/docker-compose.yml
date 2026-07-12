@@ -25,7 +25,7 @@ services:
       - -c
       - max_replication_slots=4
       - -c
-      - wal_sender_timeout=0
+      - wal_sender_timeout=60s
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
