@@ -13,10 +13,12 @@
     "slot.name": "debezium_slot",
     "publication.name": "dbz_publication",
     "publication.autocreate.mode": "disabled",
-    "table.include.list": "public.users,public.transactions",
+    "table.include.list": "public.users,public.merchants,public.products,public.transactions,public.transaction_items",
     "tombstones.on.delete": "false",
     "decimal.handling.mode": "string",
     "time.precision.mode": "connect",
-    "snapshot.mode": "initial"
+    "snapshot.mode": "initial",
+    "schema.name.adjustment.mode": "avro",
+    "field.name.adjustment.mode": "avro"
   }
 }

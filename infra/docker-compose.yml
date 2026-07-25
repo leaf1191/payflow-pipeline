@@ -1,7 +1,8 @@
 name: pp-infra
 
-# 4 runtime containers: postgres | debezium (CDC Connect) | kafka | connect-s3
+# 5 runtime containers: postgres | kafka | schema-registry | debezium (CDC) | connect-s3
 # debezium/connect 와 cp-kafka-connect 는 env 규격이 달라 공통 anchor 로 묶을 수 없음
+# Debezium 2.x 는 Confluent AvroConverter 미포함 → Dockerfile.debezium 으로 JAR 주입
 
 services:
   postgres:
@@ -66,14 +67,43 @@ services:
     networks:
       - pp-net
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.0
+    container_name: pp-schema-registry
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${SCHEMA_REGISTRY_PORT:-8081}:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: BACKWARD
+      SCHEMA_REGISTRY_HEAP_OPTS: ${SCHEMA_REGISTRY_HEAP_OPTS:--Xmx256m -Xms256m}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - pp-net
+
   debezium:
-    image: debezium/connect:2.7.3.Final
+    build:
+      context: ./connect
+      dockerfile: Dockerfile.debezium
+    image: pp-debezium-connect-avro:local
     container_name: pp-debezium
     restart: unless-stopped
     depends_on:
       kafka:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
     ports:
       - "${CONNECT_CDC_PORT:-8083}:8083"
@@ -86,10 +116,10 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_REST_ADVERTISED_HOST_NAME: debezium
       CONNECT_REST_PORT: 8083
       CONNECT_PLUGIN_PATH: /kafka/connect
@@ -113,6 +143,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      schema-registry:
+        condition: service_healthy
     ports:
       - "${CONNECT_S3_PORT:-8084}:8083"
     environment:
@@ -124,10 +156,10 @@ services:
       CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_REST_ADVERTISED_HOST_NAME: connect-s3
       CONNECT_REST_PORT: 8083
       CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
@@ -150,6 +182,8 @@ services:
     image: pp-connector-setup:local
     container_name: pp-connector-setup
     depends_on:
+      schema-registry:
+        condition: service_healthy
       debezium:
         condition: service_healthy
       connect-s3:

@@ -1,0 +1,31 @@
+# Debezium 2.x 이미지는 Confluent AvroConverter 를 더 이상 포함하지 않음.
+# S3 Sink(cp-kafka-connect)와 동일 wire format 을 쓰려면 Confluent SR + Avro JARs 를 플러그인으로 주입.
+FROM debezium/connect:2.7.3.Final
+
+ARG CONFLUENT_VERSION=7.8.0
+ARG AVRO_VERSION=1.11.3
+ARG GUAVA_VERSION=32.0.1-jre
+
+USER root
+
+# Connect plugin path 하위 디렉터리로 두면 워커가 AvroConverter 를 로드함
+ENV MAVEN_DEP_DESTINATION=/kafka/connect/avro-converter \
+    CONFLUENT_VERSION=${CONFLUENT_VERSION} \
+    AVRO_VERSION=${AVRO_VERSION} \
+    GUAVA_VERSION=${GUAVA_VERSION}
+
+RUN mkdir -p "${MAVEN_DEP_DESTINATION}" \
+ && docker-maven-download confluent kafka-connect-avro-converter "${CONFLUENT_VERSION}" 71a28b25ec993b47c07a0579b9a74ec0 \
+ && docker-maven-download confluent kafka-connect-avro-data "${CONFLUENT_VERSION}" 10fdfdd7e9370df5d9ff63411dab0a4e \
+ && docker-maven-download confluent kafka-avro-serializer "${CONFLUENT_VERSION}" 54d557c0df44a068d6c80abf81d3f36d \
+ && docker-maven-download confluent kafka-schema-serializer "${CONFLUENT_VERSION}" 88a1ff2191befa4ad0a7cfbdce2607fa \
+ && docker-maven-download confluent kafka-schema-converter "${CONFLUENT_VERSION}" 0fe708e96598cf6317b8992a65087069 \
+ && docker-maven-download confluent kafka-schema-registry-client "${CONFLUENT_VERSION}" 719683762f460f186b8426780b7594cb \
+ && docker-maven-download confluent common-config "${CONFLUENT_VERSION}" 182c208c59631808eba3f3426552e547 \
+ && docker-maven-download confluent common-utils "${CONFLUENT_VERSION}" 684c41c3f9d78fbccb3d372c8504cfc0 \
+ && docker-maven-download central org/apache/avro avro "${AVRO_VERSION}" 0ce474e395d0aad56c11293fd68ccb52 \
+ && docker-maven-download central com/google/guava guava "${GUAVA_VERSION}" 6951895e804b36322214c95917e598d4 \
+ && docker-maven-download central com/google/guava failureaccess 1.0.1 091883993ef5bfa91da01dcc8fc52236 \
+ && chown -R kafka:kafka "${MAVEN_DEP_DESTINATION}"
+
+USER kafka

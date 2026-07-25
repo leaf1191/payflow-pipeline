@@ -2,3 +2,6 @@
 .env.example
 *.log
 infra/.data/
+infra/airflow/logs/*
+!infra/airflow/logs/.gitkeep
+infra/airflow/.env
