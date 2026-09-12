@@ -1,8 +1,10 @@
 name: pp-infra
 
+# ALO (at-least-once). EOS 비교군은 ../eos
 # 5 runtime containers: postgres | kafka | schema-registry | debezium (CDC) | connect-s3
 # debezium/connect 와 cp-kafka-connect 는 env 규격이 달라 공통 anchor 로 묶을 수 없음
 # Debezium 2.x 는 Confluent AvroConverter 미포함 → Dockerfile.debezium 으로 JAR 주입
+# 포트는 eos 와 같다. 동시 기동하면 포트가 충돌한다 (비교 시 한쪽씩).
 
 services:
   postgres:
@@ -29,7 +31,7 @@ services:
       - wal_sender_timeout=60s
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ../postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
       interval: 5s
@@ -93,7 +95,7 @@ services:
 
   debezium:
     build:
-      context: ./connect
+      context: ../connect
       dockerfile: Dockerfile.debezium
     image: pp-debezium-connect-avro:local
     container_name: pp-debezium
@@ -123,6 +125,8 @@ services:
       CONNECT_REST_ADVERTISED_HOST_NAME: debezium
       CONNECT_REST_PORT: 8083
       CONNECT_PLUGIN_PATH: /kafka/connect
+      # 기본값이 disabled 이지만, EOS 스택과 diff 가 한 줄로 보이게 명시한다.
+      CONNECT_EXACTLY_ONCE_SOURCE_SUPPORT: disabled
       KAFKA_HEAP_OPTS: ${CONNECT_CDC_HEAP_OPTS:--Xmx512m -Xms512m}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8083/ >/dev/null"]
@@ -135,7 +139,7 @@ services:
 
   connect-s3:
     build:
-      context: ./connect
+      context: ../connect
       dockerfile: Dockerfile.s3
     image: pp-kafka-connect-s3:local
     container_name: pp-connect-s3
@@ -177,7 +181,7 @@ services:
 
   connector-setup:
     build:
-      context: ./connect
+      context: ../connect
       dockerfile: Dockerfile.setup
     image: pp-connector-setup:local
     container_name: pp-connector-setup
@@ -202,7 +206,7 @@ services:
       CONNECT_WAIT_TIMEOUT_SEC: ${CONNECT_WAIT_TIMEOUT_SEC:-300}
       POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-5}
     volumes:
-      - ./scripts/register-connectors.sh:/register-connectors.sh:ro
+      - ../scripts/register-connectors.sh:/register-connectors.sh:ro
       - ./connectors:/connectors:ro
     entrypoint: ["/bin/sh", "/register-connectors.sh"]
     restart: on-failure:3

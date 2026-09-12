@@ -1,0 +1,26 @@
+{
+  "name": "postgres-source",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "__DEBEZIUM_USER__",
+    "database.password": "__DEBEZIUM_PASSWORD__",
+    "database.dbname": "__POSTGRES_DB__",
+    "topic.prefix": "__TOPIC_PREFIX__",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_slot",
+    "publication.name": "dbz_publication",
+    "publication.autocreate.mode": "disabled",
+    "table.include.list": "public.users,public.merchants,public.products,public.transactions,public.transaction_items",
+    "tombstones.on.delete": "false",
+    "decimal.handling.mode": "string",
+    "time.precision.mode": "connect",
+    "snapshot.mode": "initial",
+    "schema.name.adjustment.mode": "avro",
+    "field.name.adjustment.mode": "avro",
+    "exactly.once.support": "required",
+    "transaction.boundary": "poll"
+  }
+}
