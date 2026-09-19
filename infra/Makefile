@@ -7,17 +7,23 @@
 #   make down MODE=eos
 
 MODE ?= alo
-COMPOSE := docker compose --env-file .env -f $(MODE)/docker-compose.yml
+COMPOSE := docker compose --env-file .env \
+	-f $(MODE)/docker-compose.yml \
+	-f monitoring/docker-compose.metrics.yml
 
 ifneq ($(filter $(MODE),alo eos),$(MODE))
 $(error MODE must be alo or eos, got '$(MODE)')
 endif
 
 # S3 적재 완료 후 Airflow 기동: make down && cd airflow && make up
+# 메트릭: postgres-exporter :9187, kafka jmx :7071, debezium jmx :7072,
+#         connect-s3 jmx :7073, kafka-exporter :9308
+# 로컬 scrape: ../../local/monitoring (SCRAPE_HOST=이 EC2 IP)
 
 up: build
 	$(COMPOSE) up -d
 	@echo "Started $(MODE). Run 'make connectors MODE=$(MODE)' if connector-setup did not finish successfully."
+	@echo "Metrics: :9187 :7071 :7072 :7073 :9308 (pipeline=$(MODE))"
 
 down:
 	$(COMPOSE) down

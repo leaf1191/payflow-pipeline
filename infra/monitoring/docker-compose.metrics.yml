@@ -1,0 +1,93 @@
+# ALO/EOS 공통 메트릭 오버레이.
+# make 가 -f monitoring/docker-compose.metrics.yml 로 붙인다.
+# 노출 포트는 로컬 Prometheus 가 EC2 호스트로 scrape 한다.
+#
+#   9187  postgres-exporter
+#   7071  kafka (JMX javaagent)
+#   7072  debezium / connect-cdc (JMX)
+#   7073  connect-s3 (JMX)
+#   9308  kafka-exporter (consumer lag)
+
+services:
+  jmx-agent-init:
+    build:
+      context: ./jmx
+      dockerfile: Dockerfile
+    image: pp-jmx-agent:local
+    container_name: pp-jmx-agent-init
+    volumes:
+      - jmx_agent:/jmx-out
+    restart: "no"
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: pp-postgres-exporter
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${POSTGRES_EXPORTER_PORT:-9187}:9187"
+    environment:
+      DATA_SOURCE_URI: "postgres:5432/${POSTGRES_DB:-app}?sslmode=disable"
+      DATA_SOURCE_USER: ${POSTGRES_USER:-app}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD:-change-me}
+      PG_EXPORTER_AUTO_DISCOVER_DATABASES: "false"
+    networks:
+      - pp-net
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: pp-kafka-exporter
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_EXPORTER_PORT:-9308}:9308"
+    command:
+      - --kafka.server=kafka:9092
+      - --web.listen-address=:9308
+      - --topic.filter=.*
+      - --group.filter=.*
+    networks:
+      - pp-net
+
+  kafka:
+    depends_on:
+      jmx-agent-init:
+        condition: service_completed_successfully
+    ports:
+      - "${KAFKA_JMX_PORT:-7071}:7071"
+    volumes:
+      - jmx_agent:/opt/jmx-exporter:ro
+    environment:
+      KAFKA_OPTS: >-
+        -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent.jar=7071:/opt/jmx-exporter/kafka-broker.yml
+
+  debezium:
+    depends_on:
+      jmx-agent-init:
+        condition: service_completed_successfully
+    ports:
+      - "${CONNECT_CDC_JMX_PORT:-7072}:7072"
+    volumes:
+      - jmx_agent:/opt/jmx-exporter:ro
+    environment:
+      KAFKA_OPTS: >-
+        -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent.jar=7072:/opt/jmx-exporter/kafka-connect.yml
+
+  connect-s3:
+    depends_on:
+      jmx-agent-init:
+        condition: service_completed_successfully
+    ports:
+      - "${CONNECT_S3_JMX_PORT:-7073}:7073"
+    volumes:
+      - jmx_agent:/opt/jmx-exporter:ro
+    environment:
+      KAFKA_OPTS: >-
+        -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent.jar=7073:/opt/jmx-exporter/kafka-connect.yml
+
+volumes:
+  jmx_agent:

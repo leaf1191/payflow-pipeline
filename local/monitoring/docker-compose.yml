@@ -1,0 +1,66 @@
+# 로컬에서 Prometheus + Grafana 기동.
+# EC2(alo|eos) 메트릭 포트를 scrape 한다. ALO/EOS 는 동시에 안 띄우므로 포트는 동일.
+#
+#   cp .env.example .env   # SCRAPE_HOST=EC2공인IP, PIPELINE_MODE=alo|eos
+#   docker compose up -d
+#   Grafana http://localhost:3000 (admin / admin)
+
+name: pp-local-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pp-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    environment:
+      SCRAPE_HOST: ${SCRAPE_HOST:?set SCRAPE_HOST to EC2 IP or host.docker.internal}
+      PIPELINE_MODE: ${PIPELINE_MODE:-alo}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        sed -e "s/__SCRAPE_HOST__/$${SCRAPE_HOST}/g" \
+            -e "s/__PIPELINE_MODE__/$${PIPELINE_MODE}/g" \
+            /etc/prometheus/prometheus.yml.tpl > /tmp/prometheus.yml
+        exec /bin/prometheus \
+          --config.file=/tmp/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --storage.tsdb.retention.time=15d \
+          --web.enable-lifecycle
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus/prometheus.yml.tpl:/etc/prometheus/prometheus.yml.tpl:ro
+      - prometheus_data:/prometheus
+    networks:
+      - monitor-net
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: pp-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitor-net
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  monitor-net:
+    driver: bridge

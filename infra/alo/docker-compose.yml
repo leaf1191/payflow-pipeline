@@ -2,9 +2,7 @@ name: pp-infra
 
 # ALO (at-least-once). EOS 비교군은 ../eos
 # 5 runtime containers: postgres | kafka | schema-registry | debezium (CDC) | connect-s3
-# debezium/connect 와 cp-kafka-connect 는 env 규격이 달라 공통 anchor 로 묶을 수 없음
 # Debezium 2.x 는 Confluent AvroConverter 미포함 → Dockerfile.debezium 으로 JAR 주입
-# 포트는 eos 와 같다. 동시 기동하면 포트가 충돌한다 (비교 시 한쪽씩).
 
 services:
   postgres:
@@ -57,6 +55,8 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # default.replication.factor → 기본 1
+      # min.insync.replicas → 기본 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
       KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xmx512m -Xms512m}

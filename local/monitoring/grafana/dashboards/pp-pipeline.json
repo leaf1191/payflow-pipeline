@@ -1,0 +1,235 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "JVM GC Pause (Connect CDC / S3)",
+      "targets": [
+        {
+          "expr": "rate(jvm_gc_collection_seconds_sum{service=~\"connect-cdc|connect-s3\", pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "{{service}} {{gc}}",
+          "refId": "A"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Consumer Lag (kafka-exporter)",
+      "targets": [
+        {
+          "expr": "sum by (consumergroup, topic, pipeline) (kafka_consumergroup_lag{pipeline=~\"$pipeline\"})",
+          "legendFormat": "{{pipeline}} {{consumergroup}} / {{topic}}",
+          "refId": "A"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "JVM Heap Used (Kafka / Connect)",
+      "targets": [
+        {
+          "expr": "jvm_memory_bytes_used{area=\"heap\", service=~\"kafka|connect-cdc|connect-s3\", pipeline=~\"$pipeline\"}",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Postgres Exporter Up / DB Size",
+      "targets": [
+        {
+          "expr": "pg_up{pipeline=~\"$pipeline\"}",
+          "legendFormat": "pg_up ({{pipeline}})",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_database_size_bytes{pipeline=~\"$pipeline\"}",
+          "legendFormat": "db_size {{datname}}",
+          "refId": "B"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "Connect Source / Sink Record Rate",
+      "targets": [
+        {
+          "expr": "rate(kafka_connect_source_task_source_record_poll_total{pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "source poll {{connector}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(kafka_connect_sink_task_sink_record_read_total{pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "sink read {{connector}}",
+          "refId": "B"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "title": "Scrape Targets Up",
+      "targets": [
+        {
+          "expr": "up{pipeline=~\"$pipeline\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["pp", "kafka", "connect"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(up, pipeline)",
+        "includeAll": true,
+        "label": "pipeline",
+        "multi": true,
+        "name": "pipeline",
+        "query": { "query": "label_values(up, pipeline)", "refId": "GrafanaVariableQueryEditor-VariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PP Pipeline (ALO/EOS)",
+  "uid": "pp-pipeline",
+  "version": 1,
+  "weekStart": ""
+}

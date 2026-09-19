@@ -1,0 +1,59 @@
+# Kafka Connect (Debezium / S3 Sink) JMX → Prometheus
+# JVM GC Pause: jvm_gc_collection_seconds (javaagent 기본)
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+whitelistObjectNames:
+  - kafka.connect:*
+  - kafka.consumer:*
+  - kafka.producer:*
+  - java.lang:*
+rules:
+  # Worker / connector / task
+  - pattern: kafka.connect<type=connect-worker-metrics><>([a-z-]+)
+    name: kafka_connect_worker_$1
+    type: GAUGE
+  - pattern: kafka.connect<type=connect-worker-rebalance-metrics><>([a-z-]+)
+    name: kafka_connect_worker_rebalance_$1
+    type: GAUGE
+  - pattern: kafka.connect<type=connector-metrics, connector=(.+)><>([a-z-]+)
+    name: kafka_connect_connector_$2
+    type: GAUGE
+    labels:
+      connector: "$1"
+  - pattern: kafka.connect<type=connector-task-metrics, connector=(.+), task=(.+)><>([a-z-]+)
+    name: kafka_connect_connector_task_$3
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+  - pattern: kafka.connect<type=source-task-metrics, connector=(.+), task=(.+)><>([a-z-]+)
+    name: kafka_connect_source_task_$3
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+  - pattern: kafka.connect<type=sink-task-metrics, connector=(.+), task=(.+)><>([a-z-]+)
+    name: kafka_connect_sink_task_$3
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+  - pattern: kafka.connect<type=task-error-metrics, connector=(.+), task=(.+)><>([a-z-]+)
+    name: kafka_connect_task_error_$3
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+  # Consumer (S3 sink lag 보조; 주 lag 는 kafka-exporter)
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+)><>([a-z-]+)
+    name: kafka_consumer_fetch_manager_$2
+    type: GAUGE
+    labels:
+      client_id: "$1"
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+)><>([a-z-]+)
+    name: kafka_consumer_fetch_manager_$3
+    type: GAUGE
+    labels:
+      client_id: "$1"
+      topic: "$2"
+  - pattern: ".*"

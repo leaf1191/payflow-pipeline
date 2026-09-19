@@ -1,0 +1,35 @@
+# Kafka broker JMX → Prometheus (GC/JVM 는 javaagent 기본 수집)
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+whitelistObjectNames:
+  - kafka.server:*
+  - kafka.network:*
+  - kafka.controller:*
+  - kafka.log:*
+  - kafka.coordinator.*:*
+  - java.lang:*
+rules:
+  - pattern: kafka.server<type=(.+), name=(.+), (.+)=(.+), (.+)=(.+)><>Value
+    name: kafka_server_$1_$2
+    type: GAUGE
+    labels:
+      "$3": "$4"
+      "$5": "$6"
+  - pattern: kafka.server<type=(.+), name=(.+), (.+)=(.+)><>Value
+    name: kafka_server_$1_$2
+    type: GAUGE
+    labels:
+      "$3": "$4"
+  - pattern: kafka.server<type=(.+), name=(.+)><>Value
+    name: kafka_server_$1_$2
+    type: GAUGE
+  - pattern: kafka.network<type=(.+), name=(.+)><>Value
+    name: kafka_network_$1_$2
+    type: GAUGE
+  - pattern: kafka.controller<type=(.+), name=(.+)><>Value
+    name: kafka_controller_$1_$2
+    type: GAUGE
+  - pattern: kafka.log<type=(.+), name=(.+)><>Value
+    name: kafka_log_$1_$2
+    type: GAUGE
+  - pattern: ".*"
