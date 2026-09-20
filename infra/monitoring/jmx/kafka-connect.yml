@@ -6,54 +6,185 @@ whitelistObjectNames:
   - kafka.connect:*
   - kafka.consumer:*
   - kafka.producer:*
+  - debezium.postgres:*
   - java.lang:*
 rules:
-  # Worker / connector / task
-  - pattern: kafka.connect<type=connect-worker-metrics><>([a-z-]+)
-    name: kafka_connect_worker_$1
-    type: GAUGE
-  - pattern: kafka.connect<type=connect-worker-rebalance-metrics><>([a-z-]+)
-    name: kafka_connect_worker_rebalance_$1
-    type: GAUGE
-  - pattern: kafka.connect<type=connector-metrics, connector=(.+)><>([a-z-]+)
-    name: kafka_connect_connector_$2
+  # --- Debezium PostgreSQL (CDC lag / snapshot / streaming) ---
+  # MBean: debezium.postgres:type=connector-metrics,context=streaming,server=<topic.prefix>
+  # ref: debezium-examples/monitoring/debezium-jmx-exporter/config.yml
+  - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^,]+), key=([^>]+)><>RowsScanned"
+    name: debezium_metrics_RowsScanned
     type: GAUGE
     labels:
-      connector: "$1"
-  - pattern: kafka.connect<type=connector-task-metrics, connector=(.+), task=(.+)><>([a-z-]+)
-    name: kafka_connect_connector_task_$3
+      plugin: "$1"
+      server: "$3"
+      context: "$2"
+      table: "$4"
+  - pattern: "debezium.([^:]+)<type=connector-metrics, server=([^,]+), task=([^,]+), context=([^,]+), database=([^>]+)><>([^:]+)"
+    name: debezium_metrics_$6
     type: GAUGE
     labels:
-      connector: "$1"
-      task: "$2"
-  - pattern: kafka.connect<type=source-task-metrics, connector=(.+), task=(.+)><>([a-z-]+)
-    name: kafka_connect_source_task_$3
+      plugin: "$1"
+      server: "$2"
+      task: "$3"
+      context: "$4"
+      database: "$5"
+  - pattern: "debezium.([^:]+)<type=connector-metrics, server=([^,]+), task=([^,]+), context=([^>]+)><>([^:]+)"
+    name: debezium_metrics_$5
     type: GAUGE
     labels:
-      connector: "$1"
-      task: "$2"
-  - pattern: kafka.connect<type=sink-task-metrics, connector=(.+), task=(.+)><>([a-z-]+)
-    name: kafka_connect_sink_task_$3
+      plugin: "$1"
+      server: "$2"
+      task: "$3"
+      context: "$4"
+  - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^>]+)><>([^:]+)"
+    name: debezium_metrics_$4
     type: GAUGE
     labels:
-      connector: "$1"
-      task: "$2"
-  - pattern: kafka.connect<type=task-error-metrics, connector=(.+), task=(.+)><>([a-z-]+)
-    name: kafka_connect_task_error_$3
+      plugin: "$1"
+      server: "$3"
+      context: "$2"
+
+  # --- app-info ---
+  - pattern: 'kafka.(.+)<type=app-info, client-id=(.+)><>start-time-ms'
+    name: kafka_$1_start_time_seconds
     type: GAUGE
+    valueFactor: 0.001
     labels:
-      connector: "$1"
-      task: "$2"
-  # Consumer (S3 sink lag 보조; 주 lag 는 kafka-exporter)
-  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+)><>([a-z-]+)
-    name: kafka_consumer_fetch_manager_$2
+      client_id: "$2"
+  - pattern: 'kafka.(.+)<type=app-info, client-id=(.+)><>(commit-id|version): (.+)'
+    name: kafka_$1_$3_info
+    type: GAUGE
+    value: 1
+    labels:
+      client_id: "$2"
+      $3: "$4"
+
+  # --- consumer: partition → topic → client (순서 중요; (.+) greedy) ---
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+), partition=(.+)><>(.+-total)
+    name: kafka_consumer_fetch_manager_$4
+    type: COUNTER
+    labels:
+      client_id: "$1"
+      topic: "$2"
+      partition: "$3"
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+), partition=(.+)><>(compression-rate|.+-avg|.+-replica|.+-lag|.+-lead)
+    name: kafka_consumer_fetch_manager_$4
     type: GAUGE
     labels:
       client_id: "$1"
-  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+)><>([a-z-]+)
+      topic: "$2"
+      partition: "$3"
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+)><>(.+-total)
+    name: kafka_consumer_fetch_manager_$3
+    type: COUNTER
+    labels:
+      client_id: "$1"
+      topic: "$2"
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+)><>(compression-rate|.+-avg|.+-lag|.+-lead)
     name: kafka_consumer_fetch_manager_$3
     type: GAUGE
     labels:
       client_id: "$1"
       topic: "$2"
-  - pattern: ".*"
+
+  # --- producer: topic-level (Debezium source 의 produce rate / error) ---
+  - pattern: kafka.producer<type=producer-topic-metrics, client-id=(.+), topic=(.+)><>(.+-total)
+    name: kafka_producer_topic_$3
+    type: COUNTER
+    labels:
+      client_id: "$1"
+      topic: "$2"
+  - pattern: kafka.producer<type=producer-topic-metrics, client-id=(.+), topic=(.+)><>(compression-rate|.+-avg|.+rate)
+    name: kafka_producer_topic_$3
+    type: GAUGE
+    labels:
+      client_id: "$1"
+      topic: "$2"
+
+  # --- producer/consumer node-metrics ---
+  - pattern: kafka.(.+)<type=(.+)-metrics, client-id=(.+), node-id=(.+)><>(.+-total)
+    name: kafka_$2_$5
+    type: COUNTER
+    labels:
+      client_id: "$3"
+      node_id: "$4"
+  - pattern: kafka.(.+)<type=(.+)-metrics, client-id=(.+), node-id=(.+)><>(.+-avg|.+-rate)
+    name: kafka_$2_$5
+    type: GAUGE
+    labels:
+      client_id: "$3"
+      node_id: "$4"
+
+  # --- producer/consumer client-level
+  #     type=producer-metrics → kafka_producer_metrics_*
+  #     type=consumer-metrics / consumer-fetch-manager-metrics / ... ---
+  - pattern: kafka.(.+)<type=(.+)-metrics, client-id=(.*)><>(.+-total)
+    name: kafka_$2_$4
+    type: COUNTER
+    labels:
+      client_id: "$3"
+  - pattern: kafka.(.+)<type=(.+)-metrics, client-id=(.*)><>(.+-avg|.+-bytes|.+-count|.+-ratio|.+-age|.+-flight|.+-threads|.+-rate|.+-total|.+-max|.+-min)
+    name: kafka_$2_$4
+    type: GAUGE
+    labels:
+      client_id: "$3"
+
+  # --- connect connector / task ---
+  - pattern: 'kafka.connect<type=connector-metrics, connector=(.+)><>(connector-class|connector-type|connector-version|status): (.+)'
+    name: kafka_connect_connector_$2
+    type: GAUGE
+    value: 1
+    labels:
+      connector: "$1"
+      $2: "$3"
+  - pattern: 'kafka.connect<type=connector-task-metrics, connector=(.+), task=(.+)><>status: ([a-z-]+)'
+    name: kafka_connect_connector_task_status
+    type: GAUGE
+    value: 1
+    labels:
+      connector: "$1"
+      task: "$2"
+      status: "$3"
+  - pattern: kafka.connect<type=(.+)-metrics, connector=(.+), task=(.+)><>(.+-total)
+    name: kafka_connect_$1_$4
+    type: COUNTER
+    labels:
+      connector: "$2"
+      task: "$3"
+  - pattern: kafka.connect<type=(.+)-metrics, connector=(.+), task=(.+)><>(.+-count|.+-ms|.+-ratio|.+-seq-no|.+-rate|.+-max|.+-avg|.+-failures|.+-requests|.+-timestamp|.+-logged|.+-errors|.+-retries|.+-skipped)
+    name: kafka_connect_$1_$4
+    type: GAUGE
+    labels:
+      connector: "$2"
+      task: "$3"
+  - pattern: kafka.connect<type=connector-metrics, connector=(.+)><>([a-z-]+)
+    name: kafka_connect_connector_$2
+    type: GAUGE
+    labels:
+      connector: "$1"
+
+  # --- connect worker / rebalance ---
+  - pattern: kafka.connect<type=connect-worker-metrics, connector=(.+)><>([a-z-]+)
+    name: kafka_connect_worker_$2
+    type: GAUGE
+    labels:
+      connector: "$1"
+  - pattern: kafka.connect<type=connect-worker-metrics><>([a-z-]+-total)
+    name: kafka_connect_worker_$1
+    type: COUNTER
+  - pattern: kafka.connect<type=connect-worker-metrics><>([a-z-]+)
+    name: kafka_connect_worker_$1
+    type: GAUGE
+  - pattern: 'kafka.connect<type=connect-worker-rebalance-metrics><>(leader-name|connect-protocol): (.+)'
+    name: kafka_connect_worker_rebalance_$1
+    type: GAUGE
+    value: 1
+    labels:
+      $1: "$2"
+  - pattern: kafka.connect<type=connect-worker-rebalance-metrics><>([a-z-]+-total)
+    name: kafka_connect_worker_rebalance_$1
+    type: COUNTER
+  - pattern: kafka.connect<type=connect-worker-rebalance-metrics><>([a-z-]+)
+    name: kafka_connect_worker_rebalance_$1
+    type: GAUGE
