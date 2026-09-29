@@ -41,9 +41,10 @@ PK 가 순차 증가라는 전제 위에서 k6 가 ID 를 직접 조립한다. C
 | env | 뜻 |
 | --- | --- |
 | `SOURCE_USERS`, `SOURCE_MERCHANTS` | 조회 없이 참조하므로 **실제 행 수를 넘으면 안 된다** (넘으면 FK 위반) |
-| `SOURCE_PRODUCTS` | CSV 로 넣은 상품 수. PK 는 1..N |
-| `PRODUCT_ID_MAX` | 상품 ID 공간의 상한. `(SOURCE_PRODUCTS, PRODUCT_ID_MAX]` 구간이 부하 중 생성되는 신규 상품의 자리다. 기본값은 `SOURCE_PRODUCTS * 1.2` |
-| `*_ID_PREFIX`, `*_ID_PAD` | PK 문자열 포맷. 기본 `u_000001` / `m_00001` / `p_000001` |
+| `*_ID_PREFIX`, `*_ID_PAD` | PK 문자열 포맷. 기본 `u_000001` / `m_00001` |
+
+상품은 여기 없다. ID 를 짐작하지 않고 항상 상인을 통해 조회하므로 개수도 포맷도 알 필요가 없다.
+부하 중 생기는 상품은 `pnew_<run>_<vu>_<n>` 이름을 쓰므로 CSV 시드의 PK 와 섞이지 않는다.
 
 `setup()` 이 실제 행 수를 세어 `SOURCE_USERS`/`SOURCE_MERCHANTS` 보다 적으면 실행을 중단한다.
 
@@ -61,18 +62,18 @@ VU 는 상한(기본 100)으로만 두고 실제 부하는 TPS 로 제어한다(
 | base 복귀 | 1000 | 1m + 3m |
 | drain | 0 | 30s |
 
-여기서 1 TPS = 1 iteration 이고, 결제 생성 계열은 iteration 당 SQL 2회(상품 조회 + 삽입)다.
-따라서 k6 의 목표 TPS 와 DB 가 실제로 처리한 TPS 는 일치하지 않는다. **실측값은 Grafana 를 본다.**
+1 TPS = 1 iteration = SQL 한 문장이다. 다만 k6 가 보낸 목표와 DB 가 실제로 처리한 양은 다르다.
+**실측값은 Grafana 를 본다.**
 
 ## 시나리오와 기본 가중치
 
 | # | 시나리오 | 대상 선택 방식 | env | 기본값 |
 | --- | --- | --- | --- | --- |
-| 1 | 새 결제 생성 (PENDING) | 상품 후보 3개를 SELECT 해 살아있는 것만 결제 | `W_NEW_PAYMENT` | 45 |
+| 1 | 새 결제 생성 (PENDING) | 상인 1~3곳을 둘러보고 그 상품 중 1~5종 | `W_NEW_PAYMENT` | 45 |
 | 2 | 상태 변경 (PENDING → SUCCESS/FAILED/CANCELLED) | VU 로컬 PENDING 큐 | `W_STATUS_CHANGE` | 25 |
 | 3 | 환불 (SUCCESS → REFUND) | 유저를 고른 뒤 그 유저의 SUCCESS 결제 | `W_REFUND` | 8 |
-| 4 | 상품 변경 (이름/가격/카테고리, 10% soft delete) | 랜덤 PK | `W_PRODUCT_UPDATE` | 8 |
-| 5 | 상품 추가 | 여유 ID 구간, `ON CONFLICT DO NOTHING` | `W_PRODUCT_INSERT` | 3 |
+| 4 | 상품 변경 (이름/가격/카테고리, 10% soft delete) | 상인을 고른 뒤 그 상인의 상품 하나 | `W_PRODUCT_UPDATE` | 8 |
+| 5 | 상품 추가 | 상인을 고르고 새 ID 발급 | `W_PRODUCT_INSERT` | 3 |
 | 6 | 멤버십 등급 변경 (승급 75%, 강등 25%, 단계 건너뜀 허용) | 랜덤 PK, 전이 계산은 SQL 에서 | `W_GRADE_CHANGE` | 8 |
 | 7 | DQ: 음수 단가 / 음수 수량 | 1번과 동일 | `W_DQ_NEGATIVE` | 2 |
 | 8 | DQ: `total_amount != sum(item_amount)` | 1번과 동일 | `W_DQ_AMOUNT_MISMATCH` | 2 |
@@ -81,16 +82,20 @@ VU 는 상한(기본 100)으로만 두고 실제 부하는 TPS 로 제어한다(
 
 ## 설계 메모
 
-- **결제 전 상품 생존 확인.** 상품은 부하 중 생성·삭제되므로 임의 ID 가 실제로 쓸 수 있는지
-  매번 `SELECT ... WHERE product_id IN (...) AND deleted_at IS NULL` 로 확인한다.
-  `ORDER BY random()` 같은 풀스캔 없이 PK 조회 몇 건으로 끝난다. 후보가 전부 죽어 있으면 그 결제는 건너뛴다.
+- **상품은 항상 상인을 통해 도달한다.** 임의 ID 를 만들어 존재를 확인하는 방식은 ID 공간에 상한이
+  생기고, soft delete 가 누적되면 살아있는 후보가 말라 결제가 성립하지 않는다.
+  상인으로 범위를 좁히면 나오는 건 전부 살아있는 상품이고, 카탈로그를 무한히 늘릴 수 있다.
+  `ORDER BY random()` 이 훑는 범위도 한 상인의 상품(수십 건)으로 한정된다.
+- **결제는 조회부터 삽입까지 한 문장이다.** 상인 조회 → 상품 선택 → `transactions` → `transaction_items`
+  를 data-modifying CTE 하나로 묶는다. 조회와 삽입을 따로 보내면 그 사이에 상품이 soft delete 될 수
+  있지만, 한 문장은 단일 스냅샷 위에서 실행되므로 그 창이 없다. 왕복도 1회다.
+  `BEGIN`/`COMMIT` 을 따로 보내지 않는 이유이기도 하다. 커넥션 풀이 문장마다 다른 커넥션을 줄 수 있다.
+  살아있는 상품이 하나도 없으면 `HAVING count(*) > 0` 이 막아 결제 자체가 생기지 않는다.
 - **환불은 유저에서 출발한다.** 실제 환불 요청의 진입 경로와 같고 `(user_id, status)` 인덱스를 탄다.
   같은 유저를 동시에 고른 VU 와 부딪히지 않도록 `FOR UPDATE SKIP LOCKED` 로 비켜 간다.
 - **PENDING 상태 변경만 VU 로컬 큐를 쓴다.** `status='PENDING'` 을 DB 에서 찾으면 수천 TPS 를 못 낸다.
   각 VU 가 자기가 만든 `transaction_id` 만 링버퍼에 들고 전이시키므로 VU 간 행 경합도 없다.
-- **`RETURNING 1` + `query()` 로 변경 행 수를 확인한다.** 드라이버마다 제각각인 `rowsAffected` 를 피한다.
-- **결제 삽입은 data-modifying CTE 한 문장이다.** 한 문장이라 암묵적으로 원자적이고,
-  FK 검사는 문장 종료 시점이라 `transactions` → `transaction_items` 순서가 보장된다.
+- **`RETURNING` + `query()` 로 변경 행 수를 확인한다.** 드라이버마다 제각각인 `rowsAffected` 를 피한다.
 
 ## 측정은 k6 가 하지 않는다
 
@@ -101,9 +106,10 @@ k6 요약에 남기는 건 `sql_errors` 하나뿐이고, 이건 "부하 발생�
 
 | 보려는 것 | 어디서 |
 | --- | --- |
-| 원천 DB 실제 처리량 | Grafana `Postgres Commit Rate (actual TPS)` — `rate(pg_stat_database_xact_commit[1m])` |
+| 원천 DB 실제 처리량 (평균·피크 TPS) | Grafana `Postgres Commit Rate (actual TPS)` — `rate(pg_stat_database_xact_commit[1m])` |
 | CDC 가 캡처해야 할 행 변경량 | Grafana `Postgres Row Change Rate` — `tup_inserted/updated/deleted` |
 | VU 100 이 커넥션 상한에 닿는지 | Grafana `Postgres Connections vs max_connections` |
+| 복제 슬롯이 붙잡은 WAL | Grafana `Replication Slot Retained WAL` |
 | Consumer Lag / GC Pause / Heap | Grafana 기존 패널 |
 | 정합성·중복 제거·멱등성 | 원천 DB(`sql/verify.sql`) ↔ S3 ↔ Snowflake 실데이터 대조 |
 | 목표 TPS 미달 여부 | k6 요약의 `dropped_iterations` |
@@ -129,10 +135,27 @@ exporter, psql 자리가 없어 부족하므로 compose 에서 다음을 적용�
 max_connections=300  shared_buffers=1GB  effective_cache_size=3GB
 max_wal_size=8GB  checkpoint_timeout=15min  checkpoint_completion_target=0.9
 wal_compression=on  random_page_cost=1.1  synchronous_commit=on
+max_slot_wal_keep_size=8GB  idle_in_transaction_session_timeout=300s
 ```
 
 `synchronous_commit` 은 기본 `on` 이다. 유실 0건을 증명하는 실험이므로 커밋 내구성을 끄면 안 된다.
 순수 TPS 상한만 재볼 때에 한해 `POSTGRES_SYNCHRONOUS_COMMIT=off` 를 쓴다.
+
+### WAL 폭주 방어
+
+Debezium 을 kill 해 두면 복제 슬롯이 WAL 을 붙잡고 놓지 않는다. 그대로 두면 디스크가 찬다.
+`max_slot_wal_keep_size` 가 그 상한이고, 넘으면 슬롯이 invalidated 되면서 오래된 WAL 부터 지워진다.
+
+여기에는 함정이 있다. **슬롯이 invalidated 되면 Debezium 은 재개할 수 없고 스냅샷을 다시 떠야 한다.**
+즉 이 설정은 디스크를 살리는 대신 유실 0건 검증을 포기하는 스위치다.
+계획한 다운타임 동안 쌓일 WAL 보다 반드시 크게 잡아야 하고, 실제로 걸렸다면 그 실험은 무효다.
+기준: 5000 TPS 로 3분이면 `wal_compression=on` 에서 대략 300MB 안팎이므로 8GB 는 충분히 여유롭다.
+진행 상황은 Grafana `Replication Slot Retained WAL` 패널로 본다.
+
+타임아웃은 두 층으로 나눠 걸었다. `statement_timeout` 을 전역으로 걸면
+Debezium 초기 스냅샷의 대량 `SELECT` 가 죽으므로, k6 접속 문자열의 `options` 로 세션에만 건다
+(`PG_STATEMENT_TIMEOUT_MS`, `PG_LOCK_TIMEOUT_MS`, `PG_IDLE_IN_TX_TIMEOUT_MS`).
+전역에는 죽은 세션이 WAL·락을 붙잡는 것만 막는 `idle_in_transaction_session_timeout=300s` 를 둔다.
 
 t3.large(2 vCPU)에 postgres + kafka + connect 2대를 같이 올린 개발 구성에서는 5000 TPS 가 나오지 않는다.
 `PEAK_TPS` 를 고정한 채 실측 commit rate 와 `dropped_iterations` 를 같이 보면 그 지점이 곧 한계치다.

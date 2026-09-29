@@ -307,6 +307,39 @@
         }
       ],
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Debezium 을 kill 한 동안 복제 슬롯이 붙잡고 있는 WAL. max_slot_wal_keep_size 에 닿으면 슬롯이 invalidated 되고 CDC 재개가 불가능해진다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 10,
+      "title": "Replication Slot Retained WAL",
+      "targets": [
+        {
+          "expr": "pg_replication_slot_current_wal_lsn{pipeline=~\"$pipeline\"} - pg_replication_slot_confirmed_flush_lsn{pipeline=~\"$pipeline\"}",
+          "legendFormat": "retained {{slot_name}}",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_replication_slot_is_active{pipeline=~\"$pipeline\"}",
+          "legendFormat": "active {{slot_name}}",
+          "refId": "B"
+        }
+      ],
+      "type": "timeseries"
     }
   ],
   "schemaVersion": 39,

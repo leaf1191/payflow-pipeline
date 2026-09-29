@@ -24,33 +24,26 @@ export const PG = {
     password: str('POSTGRES_PASSWORD', 'change-me'),
     database: str('POSTGRES_DB', 'app'),
     sslmode: str('POSTGRES_SSLMODE', 'disable'),
+    // k6 세션에만 거는 안전장치. 전역으로 걸면 Debezium 초기 스냅샷의 대량 SELECT 가 죽는다.
+    statementTimeoutMs: num('PG_STATEMENT_TIMEOUT_MS', 30000),
+    lockTimeoutMs: num('PG_LOCK_TIMEOUT_MS', 5000),
+    idleInTxTimeoutMs: num('PG_IDLE_IN_TX_TIMEOUT_MS', 60000),
 };
 
 // 별도 파이썬 스크립트가 CSV 로 만들어 COPY 로 주입한 기준 데이터의 규모.
 // PK 가 순차 증가라는 계약 덕분에 k6 는 조회 없이 ID 를 조립할 수 있다.
-// users / merchants 는 항상 존재한다고 가정하고 조회 없이 참조한다.
-// products 는 부하 중 생성·삭제되므로 아래 값은 "ID 탐색 범위"일 뿐이고,
-// 실제 사용 가능 여부는 매 결제마다 SELECT 로 확인한다.
+// 상품은 여기 없다. 부하 중 생성·삭제되므로 ID 를 짐작하지 않고 상인을 통해 조회한다.
 export const SOURCE = {
     users: num('SOURCE_USERS', 50000),
     merchants: num('SOURCE_MERCHANTS', 500),
-    products: num('SOURCE_PRODUCTS', 20000),
-    // 신규 상품이 들어갈 여유 구간의 상한. SOURCE_PRODUCTS 초과분이 5번 시나리오의 몫이다.
-    productIdMax: num('PRODUCT_ID_MAX', 0),
 };
 
-if (SOURCE.productIdMax === 0) {
-    SOURCE.productIdMax = Math.ceil(SOURCE.products * 1.2);
-}
-
-// CSV 생성 스크립트와 맞춰야 하는 PK 포맷. 기본값은 u_000001 / m_00001 / p_000001.
+// CSV 생성 스크립트와 맞춰야 하는 PK 포맷. 기본값은 u_000001 / m_00001.
 export const ID_FORMAT = {
     userPrefix: str('USER_ID_PREFIX', 'u_'),
     userPad: num('USER_ID_PAD', 6),
     merchantPrefix: str('MERCHANT_ID_PREFIX', 'm_'),
     merchantPad: num('MERCHANT_ID_PAD', 5),
-    productPrefix: str('PRODUCT_ID_PREFIX', 'p_'),
-    productPad: num('PRODUCT_ID_PAD', 6),
 };
 
 export const LOAD = {
@@ -79,8 +72,10 @@ export const WEIGHTS = {
 };
 
 export const BEHAVIOR = {
-    // 결제 1건이 후보로 조회할 상품 개수. 이 중 살아있는 것만 실제로 결제한다.
-    productCandidates: num('PRODUCT_CANDIDATES', 3),
+    // 한 유저가 한 번에 둘러보는 상인 수(1..max). 실제 장바구니처럼 여러 상점을 훑는다.
+    browseMerchantsMax: num('BROWSE_MERCHANTS_MAX', 3),
+    // 그 상인들의 상품 중 실제로 담는 종류 수(1..max).
+    itemsPerTxMax: num('ITEMS_PER_TX_MAX', 5),
     // VU 가 기억하는 PENDING transaction_id 상한. 메모리 상한을 고정하기 위한 값.
     trackedIdLimit: num('TRACKED_ID_LIMIT', 2000),
     // 상품 변경 중 soft delete 비율(%).
@@ -92,6 +87,11 @@ export const BEHAVIOR = {
 
 export function connectionString() {
     const auth = `${encodeURIComponent(PG.user)}:${encodeURIComponent(PG.password)}`;
-    const params = `sslmode=${PG.sslmode}&application_name=k6-load`;
+    const sessionOptions = encodeURIComponent(
+        `-c statement_timeout=${PG.statementTimeoutMs} ` +
+            `-c lock_timeout=${PG.lockTimeoutMs} ` +
+            `-c idle_in_transaction_session_timeout=${PG.idleInTxTimeoutMs}`
+    );
+    const params = `sslmode=${PG.sslmode}&application_name=k6-load&options=${sessionOptions}`;
     return `postgres://${auth}@${PG.host}:${PG.port}/${PG.database}?${params}`;
 }

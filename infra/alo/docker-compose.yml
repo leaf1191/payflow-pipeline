@@ -49,6 +49,15 @@ services:
       - random_page_cost=1.1
       - -c
       - synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}
+      # Debezium 을 kill 해 둔 동안 복제 슬롯이 WAL 을 붙잡아 디스크를 채우는 것을 막는다.
+      # 한도를 넘으면 슬롯이 invalidated 되고 오래된 WAL 부터 지워진다.
+      # 슬롯이 죽으면 CDC 재개가 불가능하므로, 이 값에 걸렸다는 건 그 실험이 실패했다는 뜻이다.
+      - -c
+      - max_slot_wal_keep_size=${POSTGRES_MAX_SLOT_WAL_KEEP_SIZE:-8GB}
+      # 트랜잭션을 열어둔 채 죽은 세션이 WAL·락을 붙잡지 못하게 한다.
+      # statement_timeout 은 전역으로 걸지 않는다. Debezium 초기 스냅샷의 대량 SELECT 가 죽는다.
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TX_TIMEOUT:-300s}
     shm_size: 512m
     volumes:
       - postgres_data:/var/lib/postgresql/data

@@ -53,6 +53,10 @@ services:
       - random_page_cost=1.1
       - -c
       - synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}
+      - -c
+      - max_slot_wal_keep_size=${POSTGRES_MAX_SLOT_WAL_KEEP_SIZE:-8GB}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TX_TIMEOUT:-300s}
     shm_size: 512m
     volumes:
       - postgres_data:/var/lib/postgresql/data

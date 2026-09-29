@@ -6,19 +6,23 @@ import { randInt } from './random.js';
 // VU 별 로컬 상태. k6 는 VU 마다 JS 런타임이 분리되므로 VU 간 경합이 없다.
 // PENDING 결제만 로컬에 들고 있는다. 상태 전이 대상을 DB 에서 찾으려면
 // status='PENDING' 을 훑어야 하는데, 그건 초당 수천 건 규모에서 감당이 안 된다.
-// 반대로 환불은 "유저의 SUCCESS 결제"라는 현실적인 조건이 있으므로 DB 에서 찾는다.
+// 환불은 "유저의 SUCCESS 결제", 상품은 "상인의 상품" 이라는 현실적인 경로가 있어 DB 에서 찾는다.
 export function createVuState(runId) {
     const vuId = exec.vu.idInTest;
     let sequence = 0;
+
+    function nextId(prefix) {
+        sequence += 1;
+        return `${prefix}_${runId}_${vuId}_${sequence}`;
+    }
 
     return {
         runId: runId,
         vuId: vuId,
         pending: new RingBuffer(BEHAVIOR.trackedIdLimit),
-        nextTransactionId: function nextTransactionId() {
-            sequence += 1;
-            return `tx_${runId}_${vuId}_${sequence}`;
-        },
+        nextTransactionId: () => nextId('tx'),
+        // 부하 중 생기는 상품. 시드 PK 와 섞이지 않는 이름이면 충분하다.
+        nextProductId: () => nextId('pnew'),
     };
 }
 
@@ -67,18 +71,16 @@ export function randomMerchantId() {
     return formatId(ID_FORMAT.merchantPrefix, ID_FORMAT.merchantPad, randInt(1, SOURCE.merchants));
 }
 
-// 결제 후보용. soft delete 되었거나 아직 생성되지 않은 ID 도 섞여 나온다.
-// 실제 사용 가능 여부는 호출부가 SELECT 로 판별한다.
-export function randomProductId() {
-    return formatId(ID_FORMAT.productPrefix, ID_FORMAT.productPad, randInt(1, SOURCE.productIdMax));
-}
-
-// 신규 상품용. 시드 구간 밖의 여유 ID 를 쓰므로 조회 범위 안에 들어오고,
-// 부하 중 생성된 상품도 이후 결제 후보가 된다.
-export function newProductId() {
-    return formatId(
-        ID_FORMAT.productPrefix,
-        ID_FORMAT.productPad,
-        randInt(SOURCE.products + 1, SOURCE.productIdMax)
-    );
+// 한 유저가 둘러보는 상인 목록(중복 제거).
+export function randomMerchantIds(count) {
+    const seen = {};
+    const ids = [];
+    for (let i = 0; i < count; i += 1) {
+        const id = randomMerchantId();
+        if (!seen[id]) {
+            seen[id] = true;
+            ids.push(id);
+        }
+    }
+    return ids;
 }

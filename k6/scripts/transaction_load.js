@@ -54,7 +54,7 @@ export function setup() {
     )[0];
 
     // users/merchants 는 조회 없이 ID 를 조립하므로, 설정값이 실제보다 크면 FK 위반이 쏟아진다.
-    // products 는 매 결제마다 존재를 확인하므로 개수가 달라도 무방하다.
+    // products 는 상인을 통해 조회하므로 개수를 알 필요가 없다.
     const counts = {
         users: Number(actual.users),
         merchants: Number(actual.merchants),
@@ -68,6 +68,9 @@ export function setup() {
             );
         }
     }
+    if (counts.products === 0) {
+        throw new Error('products table is empty: nothing to buy. load the CSV seed first');
+    }
 
     const maxConnections = Number(db.query('SHOW max_connections')[0].max_connections);
     if (maxConnections < LOAD.vus + 30) {
@@ -77,10 +80,7 @@ export function setup() {
         );
     }
 
-    console.log(
-        `run_id=${runId} source=${JSON.stringify(counts)} ` +
-            `product_id_range=1..${SOURCE.productIdMax} max_connections=${maxConnections}`
-    );
+    console.log(`run_id=${runId} source=${JSON.stringify(counts)} max_connections=${maxConnections}`);
 
     return { runId: runId };
 }

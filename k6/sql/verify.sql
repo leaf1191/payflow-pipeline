@@ -59,10 +59,3 @@ SELECT left(md5(transaction_id), 1) AS bucket,
   FROM transactions
  GROUP BY 1
  ORDER BY 1;
-
-\echo '== observed throughput (top 10 seconds by insert count) =='
-SELECT date_trunc('second', created_at) AS ts, count(*) AS rows_created
-  FROM transactions
- GROUP BY 1
- ORDER BY rows_created DESC
- LIMIT 10;
