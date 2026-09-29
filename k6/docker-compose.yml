@@ -6,20 +6,22 @@ services:
       context: .
       dockerfile: Dockerfile
     image: pp-k6:local
+    # .env 가 컨테이너 환경변수이자 compose 보간 소스다.
+    # 여기서 재선언하면 .env 값을 덮어쓰므로 접속 호스트만 예외로 둔다.
     env_file:
       - path: .env
         required: false
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST:-host.docker.internal}
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      POSTGRES_DB: ${POSTGRES_DB:-app}
-      VUS: ${VUS:-10}
-      DURATION: ${DURATION:-30s}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # VU 100 개가 각자 커넥션을 열면 기본 nofile 로는 부족하다.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - ./scripts:/scripts:ro
+      - ./results:/results
     profiles:
       - load

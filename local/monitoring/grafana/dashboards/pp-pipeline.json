@@ -203,6 +203,110 @@
         }
       ],
       "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "원천 DB 가 실제로 처리한 TPS. k6 가 보낸 목표 TPS 가 아니라 이 값이 파이프라인 입력의 정답이다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 7,
+      "title": "Postgres Commit Rate (actual TPS)",
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_xact_commit{datname!~\"template.*|postgres\", pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "commit {{datname}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_stat_database_xact_rollback{datname!~\"template.*|postgres\", pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "rollback {{datname}}",
+          "refId": "B"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "CDC 가 캡처해야 할 행 변경량. Debezium source record rate 와 이 값이 벌어지면 캡처가 밀리고 있다는 뜻이다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 8,
+      "title": "Postgres Row Change Rate (insert/update/delete)",
+      "targets": [
+        {
+          "expr": "rate(pg_stat_database_tup_inserted{datname!~\"template.*|postgres\", pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "inserted",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_stat_database_tup_updated{datname!~\"template.*|postgres\", pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "updated",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(pg_stat_database_tup_deleted{datname!~\"template.*|postgres\", pipeline=~\"$pipeline\"}[1m])",
+          "legendFormat": "deleted",
+          "refId": "C"
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "VU 100 개가 max_connections 에 닿는지 확인한다. 상한에 붙으면 k6 쪽에서 연결 오류가 난다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 9,
+      "title": "Postgres Connections vs max_connections",
+      "targets": [
+        {
+          "expr": "sum(pg_stat_database_numbackends{datname!~\"template.*|postgres\", pipeline=~\"$pipeline\"})",
+          "legendFormat": "backends",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_settings_max_connections{pipeline=~\"$pipeline\"}",
+          "legendFormat": "max_connections",
+          "refId": "B"
+        }
+      ],
+      "type": "timeseries"
     }
   ],
   "schemaVersion": 39,

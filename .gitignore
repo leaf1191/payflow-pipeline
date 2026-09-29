@@ -5,3 +5,4 @@ infra/.data/
 infra/airflow/logs/*
 !infra/airflow/logs/.gitkeep
 infra/airflow/.env
+k6/results/

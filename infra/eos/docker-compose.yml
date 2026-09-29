@@ -22,6 +22,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-app}
       DEBEZIUM_USER: ${DEBEZIUM_USER:-debezium}
       DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-change-me-debezium}
+    # ALO 와 동일한 원천 DB 조건에서 비교해야 하므로 튜닝 값도 같게 유지한다.
     command:
       - postgres
       - -c
@@ -32,6 +33,27 @@ services:
       - max_replication_slots=4
       - -c
       - wal_sender_timeout=60s
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-300}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-8GB}
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}
+    shm_size: 512m
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../postgres/init:/docker-entrypoint-initdb.d:ro

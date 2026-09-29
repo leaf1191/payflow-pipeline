@@ -62,6 +62,8 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
     CREATE INDEX idx_products_merchant_id ON products (merchant_id);
     CREATE INDEX idx_products_category ON products (category);
     CREATE INDEX idx_transactions_user_id ON transactions (user_id);
+    -- 환불 대상 탐색: "이 유저의 SUCCESS 결제" 를 스캔 없이 찾기 위한 인덱스
+    CREATE INDEX idx_transactions_user_status ON transactions (user_id, status);
     CREATE INDEX idx_transactions_status ON transactions (status);
     CREATE INDEX idx_transactions_created_at ON transactions (created_at);
     CREATE INDEX idx_transactions_updated_at ON transactions (updated_at);
