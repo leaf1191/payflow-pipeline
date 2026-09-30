@@ -3,7 +3,7 @@
   "config": {
     "connector.class": "io.confluent.connect.s3.S3SinkConnector",
     "tasks.max": "1",
-    "topics.regex": "__TOPIC_PREFIX__\\..*",
+    "topics.regex": "__TOPIC_PREFIX__\\.public\\.(users|merchants|products|transactions|transaction_items)",
     "s3.bucket.name": "__S3_BUCKET__",
     "s3.region": "__AWS_REGION__",
     "s3.part.size": "5242880",

@@ -32,22 +32,6 @@ export function runSql(op, query, args) {
         return null;
     }
 }
-
-// BEGIN / COMMIT / ROLLBACK 처럼 결과셋이 없는 문장. 성공 여부만 돌려준다.
-export function execSql(op, query) {
-    try {
-        db.exec(query);
-        return true;
-    } catch (err) {
-        sqlErrors.add(1, { op: op });
-        if (loggedErrors < ERROR_LOG_LIMIT) {
-            loggedErrors += 1;
-            console.error(`[${op}] ${err}`);
-        }
-        return false;
-    }
-}
-
 export function closeDb() {
     db.close();
 }

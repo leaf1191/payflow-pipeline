@@ -23,6 +23,10 @@ export function createVuState(runId) {
         nextTransactionId: () => nextId('tx'),
         // 부하 중 생기는 상품. 시드 PK 와 섞이지 않는 이름이면 충분하다.
         nextProductId: () => nextId('pnew'),
+        // 상품 변경 이벤트의 after-image 에 심을 토큰.
+        // (runId, vuId, sequence) 조합이라 전역 유일이 구조적으로 보장된다.
+        // CDC 이벤트 식별자가 이 값에 의존하므로 난수로 바꾸면 안 된다. 아래 productUpdate 주석 참고.
+        nextRevision: () => nextId('rev'),
     };
 }
 

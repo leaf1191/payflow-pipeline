@@ -9,57 +9,72 @@
 -- 아래 전수 집계는 그보다 오래 걸릴 수 있으므로 이 세션에서만 푼다.
 SET statement_timeout = 0;
 
+-- flush.sql 이 넣은 센티널 행을 전 구간에서 제외한다. 센티널은 S3 sink 의 마지막 파일을
+-- 닫기 위한 더미이고 비즈니스 데이터가 아니다. 실행마다 누적되므로 반드시 걸러야 한다.
+-- Snowflake 쪽 COPY/MERGE 에도 같은 필터가 있어야 한다.
+CREATE TEMP VIEW v_users AS
+    SELECT * FROM users WHERE NOT starts_with(user_id, '__flush_');
+CREATE TEMP VIEW v_merchants AS
+    SELECT * FROM merchants WHERE NOT starts_with(merchant_id, '__flush_');
+CREATE TEMP VIEW v_products AS
+    SELECT * FROM products WHERE NOT starts_with(product_id, '__flush_');
+CREATE TEMP VIEW v_transactions AS
+    SELECT * FROM transactions WHERE NOT starts_with(transaction_id, '__flush_');
+CREATE TEMP VIEW v_transaction_items AS
+    SELECT * FROM transaction_items WHERE NOT starts_with(item_id, '__flush_');
+
 \echo '== row counts =='
 SELECT
-    (SELECT count(*) FROM users)             AS users,
-    (SELECT count(*) FROM merchants)         AS merchants,
-    (SELECT count(*) FROM products)          AS products,
-    (SELECT count(*) FROM transactions)      AS transactions,
-    (SELECT count(*) FROM transaction_items) AS transaction_items;
+    (SELECT count(*) FROM v_users)             AS users,
+    (SELECT count(*) FROM v_merchants)         AS merchants,
+    (SELECT count(*) FROM v_products)          AS products,
+    (SELECT count(*) FROM v_transactions)      AS transactions,
+    (SELECT count(*) FROM v_transaction_items) AS transaction_items;
 
 \echo '== transaction status distribution =='
 SELECT status, count(*) AS cnt
-  FROM transactions
+  FROM v_transactions
  GROUP BY status
  ORDER BY cnt DESC;
 
 \echo '== user grade distribution =='
 SELECT user_grade, count(*) AS cnt
-  FROM users
+  FROM v_users
  GROUP BY user_grade
  ORDER BY user_grade;
 
-\echo '== products: seeded vs created during load, soft deleted =='
+\echo '== products: alive vs soft deleted =='
 SELECT
     count(*) FILTER (WHERE deleted_at IS NOT NULL) AS soft_deleted,
-    count(*) FILTER (WHERE deleted_at IS NULL)     AS alive;
+    count(*) FILTER (WHERE deleted_at IS NULL)     AS alive
+  FROM v_products;
 
 \echo '== DQ: negative price or quantity =='
 SELECT count(DISTINCT transaction_id) AS bad_transactions,
        count(*)                       AS bad_items
-  FROM transaction_items
+  FROM v_transaction_items
  WHERE unit_price < 0 OR quantity < 0 OR item_amount < 0;
 
 \echo '== DQ: total_amount != sum(item_amount) =='
 SELECT count(*) AS mismatched_transactions
-  FROM transactions t
+  FROM v_transactions t
  WHERE t.total_amount <> (
            SELECT COALESCE(sum(i.item_amount), 0)
              FROM transaction_items i
             WHERE i.transaction_id = t.transaction_id);
 
--- k6 는 BEGIN/COMMIT 으로 transactions 와 items 를 한 트랜잭션에 묶는다.
--- 커넥션 풀이 문장마다 다른 커넥션을 줬다면 BEGIN 이 무효화되어 각 INSERT 가 autocommit 되고,
--- 그 경우 items 없는 transactions 행이 남는다. 즉 이 값은 트랜잭션 경계가 성립했다는 증거다.
+-- 결제는 조회부터 두 INSERT 까지가 CTE 한 문장이다. 한 문장은 곧 한 트랜잭션이므로
+-- transactions 행이 있으면 items 행도 반드시 있어야 한다. 이 값이 0 이 아니면
+-- 원자성이 깨진 것이고, 곧 후방 정합 레이어가 반쪽 결제를 보게 된다는 뜻이다.
 \echo '== atomicity: transactions without any item (must be 0) =='
 SELECT count(*) AS orphan_transactions
-  FROM transactions t
+  FROM v_transactions t
  WHERE NOT EXISTS (
            SELECT 1 FROM transaction_items i WHERE i.transaction_id = t.transaction_id);
 
 \echo '== integrity: items referencing a product that no longer exists (must be 0) =='
 SELECT count(*) AS orphan_items
-  FROM transaction_items i
+  FROM v_transaction_items i
   LEFT JOIN products p ON p.product_id = i.product_id
  WHERE p.product_id IS NULL;
 
@@ -69,6 +84,6 @@ SELECT count(*) AS orphan_items
 SELECT left(md5(transaction_id), 1) AS bucket,
        count(*)                     AS cnt,
        sum(total_amount)            AS total_amount_sum
-  FROM transactions
+  FROM v_transactions
  GROUP BY 1
  ORDER BY 1;

@@ -30,8 +30,14 @@ docker compose --profile load build
 # 시드를 DW 로 넘기려면 incremental snapshot 신호를 한 번 넣는다.
 psql -h <PG_HOST> -U app -d app -f ../infra/postgres/snapshot.sql
 
-./run.sh smoke                  # SQL 검증 + 트랜잭션 경계 검증
+./run.sh smoke                  # SQL 검증
 ./run.sh transaction_load       # 본 부하
+
+# S3 sink 의 마지막 파일은 트래픽이 끊기면 안 닫힌다.
+# rotate.interval.ms + 여유만큼 기다린 뒤 센티널을 넣어 밀어낸다.
+sleep 70
+psql -h <PG_HOST> -U app -d app -f sql/flush.sql
+
 psql -h <PG_HOST> -U app -d app -f sql/verify.sql
 ```
 
@@ -65,12 +71,11 @@ VU 는 상한(기본 100)으로만 두고 실제 부하는 TPS 로 제어한다(
 | base 복귀 | 1000 | 1m + 3m |
 | drain | 0 | 30s |
 
-1 TPS = 1 iteration 이다. 다만 결제 계열 iteration 은 SQL 5회 왕복(`BEGIN` ~ `COMMIT`)이므로
-k6 가 보낸 목표와 DB 가 실제로 처리한 양은 다르다. **실측값은 Grafana 를 본다.**
+1 TPS = 1 iteration = SQL 한 문장 = 한 트랜잭션이다. 다만 k6 가 보낸 목표와 DB 가 실제로 처리한
+양은 다르다. **실측값은 Grafana 를 본다.**
 
-왕복이 5회라는 점은 달성 가능한 TPS 상한을 좌우한다. RTT 가 붙는 원격에서 돌리면
-`VUS × (1 / (5 × RTT))` 가 천장이 된다. 피크 5000 TPS 를 노린다면 k6 를 DB 와 같은 VPC 안에서
-돌려야 하고, 로컬에서 돌리는 검증용 실행은 애초에 낮은 TPS 를 전제로 한다.
+달성 가능한 TPS 상한은 `VUS × (1 / RTT)` 에 묶인다. 피크 5000 TPS 를 노린다면 k6 를 DB 와 같은
+VPC 안에서 돌려야 하고, 로컬에서 돌리는 검증용 실행은 애초에 낮은 TPS 를 전제로 한다.
 
 ## 시나리오와 기본 가중치
 
@@ -93,20 +98,21 @@ k6 가 보낸 목표와 DB 가 실제로 처리한 양은 다르다. **실측값
   생기고, soft delete 가 누적되면 살아있는 후보가 말라 결제가 성립하지 않는다.
   상인으로 범위를 좁히면 나오는 건 전부 살아있는 상품이고, 카탈로그를 무한히 늘릴 수 있다.
   `ORDER BY random()` 이 훑는 범위도 한 상인의 상품(수십 건)으로 한정된다.
-- **결제는 명시적 트랜잭션으로 다섯 왕복에 나눈다.**
-  `BEGIN` → `SELECT`(상인의 상품) → `INSERT transactions` → `INSERT transaction_items` → `COMMIT`.
-  한 문장으로 합치면 성능은 좋지만 두 가지를 잃는다.
-  첫째, 트랜잭션이 여러 왕복에 걸쳐 열려 있어야 여러 VU 의 LSN 구간이 실제로 겹친다.
-  `txA(100~300)` 안에 `txB(200~250)` 가 끼고, Debezium 은 이걸 커밋 순서로 재정렬해 내보낸다.
-  LSN 순서와 CDC 출력 순서가 어긋나는 이 상태가 Snowflake `MERGE` 가 실제로 견뎌야 하는 조건이다.
-  둘째, 수량·금액·수수료·오염값을 JS 가 만든다. `random()` 과 산술을 SQL 에 넣으면
-  부하 발생기의 연산이 측정 대상인 DB 의 CPU 를 먹는다.
-  상품 조회는 트랜잭션 안에서 하므로 잡힌 목록은 `COMMIT` 까지 같은 스냅샷으로 유지된다.
-  실패하면 반드시 `ROLLBACK` 을 보낸다. 안 보내면 그 커넥션이 aborted 상태로 남아 이후 전부 실패한다.
-- **트랜잭션 경계는 검증 대상이다.** xk6-sql 의 `Database` 는 커넥션 풀이고 트랜잭션 API 가 없다.
-  `BEGIN` 을 따로 보낸 뒤 다음 문장이 다른 커넥션으로 가면 트랜잭션이 **조용히** 깨진다.
-  `smoke.js` 가 `BEGIN` 안에서 `txid_current()` 를 두 번 읽어 같은 값인지 확인하고,
-  `verify.sql` 은 items 없는 transactions 행이 0인지 확인한다. 두 번째가 사후 탐지 수단이다.
+- **결제는 조회부터 삽입까지 CTE 한 문장이다.** 상인 조회 → 상품 선택 → `transactions` →
+  `transaction_items` 가 하나의 문장이고, 따라서 하나의 트랜잭션이다. 왕복도 1회다.
+  `BEGIN`/`COMMIT` 을 따로 보내지 않는다. xk6-sql 의 `Database` 는 커넥션 풀이고 트랜잭션 API 가
+  없어서, 문장마다 다른 커넥션을 받으면 트랜잭션이 **조용히** 깨진다.
+  한 번의 `query()` 안에 `BEGIN~COMMIT` 을 문자열로 넣는 방법은 중간 결과를 JS 로 꺼낼 수 없어
+  이 CTE 와 결국 같아진다.
+- **난수는 JS 가 만들어 `VALUES` 로 주입한다.** 수량과 오염 부호를 `spec(rn, quantity, price_sign)`
+  으로 넘기고 `rn` 으로 조인한다. DB 에 남는 난수는 상품 선택의 `ORDER BY random()` 하나뿐이고,
+  그것도 상인 범위(수십 행)로 한정된다. 부하 발생기의 연산이 측정 대상인 DB 의 CPU 를 먹지 않게 하려는 것이다.
+- **짧은 트랜잭션이어도 LSN 은 뒤섞인다.** 한 문장도 행마다 WAL 레코드를 만들고,
+  동시 실행 중인 다른 트랜잭션의 레코드가 그 사이에 낀다. 게다가 논리 디코딩은 **커밋 순서로**
+  재정렬해 내보내므로, LSN 오름차순과 CDC 출력 순서가 어긋나는 상황은 트랜잭션 길이와 무관하게
+  동시성만 있으면 발생한다. 긴 트랜잭션은 그 정도를 키울 뿐이라 굳이 왕복을 늘리지 않았다.
+  덧붙여 **같은 PK 에 대해서는 행 락이 직렬화하므로 LSN 순서와 커밋 순서가 항상 일치한다.**
+  PK 단위로 동작하는 `MERGE`/SCD2 가 안전한 근거가 여기에 있다.
 - **환불은 유저에서 출발한다.** 실제 환불 요청의 진입 경로와 같고 `(user_id, status)` 인덱스를 탄다.
   같은 유저를 동시에 고른 VU 와 부딪히지 않도록 `FOR UPDATE SKIP LOCKED` 로 비켜 간다.
 - **PENDING 상태 변경만 VU 로컬 큐를 쓴다.** `status='PENDING'` 을 DB 에서 찾으면 수천 TPS 를 못 낸다.
@@ -139,7 +145,40 @@ commit rate 가 먼저 꺾이면 DB 가 병목이다.
 `PENDING → SUCCESS → REFUND` 라는 3개의 CDC 이벤트가 있었다는 사실은 이 테이블에 남지 않는다.
 즉 최종 상태가 일치해도 중간 이벤트 유실은 잡히지 않는다.
 
-이벤트 단위 전수 검증을 하려면 원천에 append-only 이력이 필요하다(미결정, 아래 참고).
+### 이벤트 단위 감사 키
+
+이벤트 전수 검증은 k6 가 기록한 성공 이벤트 집합이 S3 parquet 에 **포함**되는지를 본다.
+단방향인 이유는 커밋은 성공했지만 k6 가 응답을 못 받는 경우가 있어서다. 반대 방향의 초과분은
+ALO 중복이고, 그건 유실이 아니라 별도로 세야 하는 증거다.
+
+키는 `(op, pk, updated_at_ms, after-image)` 다. 앞의 셋만으로는 부족하다.
+Debezium 이 Avro 호환성을 위해 Connect 논리 타입(epoch millis)을 쓰므로 parquet 의 시간
+정밀도가 밀리초이고, 같은 PK 가 같은 밀리초에 두 번 변경될 수 있다. us/ns 로 쪼개도 겹칠
+가능성이 남고, 후방 정합은 어차피 커밋 LSN + 트랜잭션 내 LSN(`source.lsn`)을 순서 기준으로
+쓰므로 시간 정밀도를 올릴 이유가 없다.
+
+그래서 바뀐 컬럼 값까지 키에 넣는다. 시나리오별로 유일성 근거가 다르다.
+
+| 이벤트 | 유일성 근거 |
+| --- | --- |
+| INSERT 전부 | PK 가 k6 생성값이라 그 자체로 유일 |
+| `status_change` | VU 로컬 링 버퍼에서 꺼내 제거 + `status='PENDING'` 가드 → PK 당 1회 |
+| `refund` | `status='SUCCESS'` 가드, 결과가 REFUND → PK 당 최대 1회 |
+| `product_soft_delete` | `deleted_at IS NULL` 가드 → PK 당 최대 1회 |
+| `product_update` | `product_name` 에 `(runId, vuId, sequence)` 토큰을 심어 after-image 가 항상 다름 |
+| `grade_change` | **잔여 충돌 있음** (아래) |
+
+`grade_change` 만 값 공간이 4개뿐이라 심을 엔트로피가 없다. 행 락이 직렬화하고 `<>` 가드가
+있어 연속한 두 이벤트는 값이 다르지만, 같은 유저가 같은 밀리초에 3회 이상 변경되며 값이
+되돌아오면(`BRONZE→GOLD→SILVER→GOLD`) 1번과 3번의 키가 같아진다.
+
+이 잔여 케이스도 비교를 `DISTINCT` 가 아니라 **멀티셋 건수**로 하면 유실은 그대로 잡힌다.
+키가 합쳐져 k6 가 2건으로 세고 S3 가 1건이면 `k6 <= S3` 가 깨진다.
+`DISTINCT` 를 쓰면 양쪽이 똑같이 1건으로 붕괴해서 유실이 감춰지고, ALO 중복 증거까지 사라진다.
+
+남는 구멍은 같은 키에서 1건 유실과 1건 중복이 정확히 상쇄되는 경우뿐이다. 중복은 커넥터
+재시작 시 오프셋 배치 단위로 발생하므로 하필 그 키, 그 밀리초에서 상쇄될 확률은 무시할 수준이고,
+실제 충돌 키 수는 감사 스크립트가 같이 출력하므로 추측하지 않고 확인할 수 있다.
 
 ## Postgres 수용량
 
@@ -173,6 +212,28 @@ Debezium 이 살아 있어도 슬롯이 멈출 수 있다. 캡처 대상 테이�
 - `heartbeat.action.query` — `debezium_heartbeat` 테이블을 갱신해 WAL 에 실제 변경을 만든다.
   오프셋 ack 만으로는 부족한 상황(다른 DB·다른 슬롯만 바쁜 경우)을 위한 것이고,
   **이 테이블은 publication 에 포함되어야 동작한다.**
+
+`debezium_signal` 과 `debezium_heartbeat` 는 **publication 에는 넣고 `table.include.list` 에서는 뺀다.**
+둘의 역할이 다르다. publication 은 Postgres 가 WAL 에서 논리 디코딩할 대상이고,
+`table.include.list` 는 디코딩된 이벤트에 적용되는 커넥터 레벨 필터다.
+incremental snapshot 의 watermark 는 이 필터보다 앞에서 커넥터가 내부적으로 소비하므로,
+publication 에만 있으면 스냅샷은 정상 동작하고 Kafka 발행은 일어나지 않는다.
+(Debezium 문서: "If you use the `table.include.list` property, you do not need to include the
+signaling data collection in it.")
+
+S3 sink 의 `topics.regex` 도 비즈니스 테이블 5개 화이트리스트로 좁혀 두었다. 위 설정만으로
+이미 차단되지만, include list 가 나중에 넓어지거나 새 토픽이 끼어들 때의 2차 방어선이다.
+
+### incremental snapshot 과 VARCHAR PK
+
+PK 가 VARCHAR 이면 주의할 점이 하나 있다. incremental snapshot 은 PK 로 정렬해 chunk 를 나누고
+`WHERE pk > <last>` 로 다음 chunk 를 가져오는데, **경계 비교는 커넥터(Java) 쪽에서 문자열 비교로
+수행된다.** DB 의 정렬이 기본 collation(문자 가중치 기반)이면 Java 의 코드포인트 순서와 어긋나고,
+경계가 틀어지면서 행이 스킵되거나 chunk 가 통째로 커지는 일이 생긴다.
+
+그래서 ID 계열 컬럼을 전부 `COLLATE "C"` 로 선언했다. 바이트 순서라 ASCII ID 에서는 Java 비교와
+정확히 일치한다. 부수 효과로 문자열 인덱스 비교도 빨라진다.
+이미 만들어진 DB 에는 적용되지 않으므로 볼륨을 새로 만들어야 한다.
 
 타임아웃은 전역으로만 건다(`statement_timeout=30s`, `lock_timeout=5s`,
 `idle_in_transaction_session_timeout=60s`). 세션에서 덮어쓰면 전역값이 적용될 세션이 없어

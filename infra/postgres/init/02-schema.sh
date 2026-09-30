@@ -2,9 +2,18 @@
 set -euo pipefail
 
 psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" <<-EOSQL
+    -- ID 계열 VARCHAR 은 전부 COLLATE "C" 다.
+    --
+    -- Debezium incremental snapshot 은 PK 로 정렬해 chunk 를 나누고,
+    -- chunk 경계 비교는 커넥터(Java) 쪽에서 String 비교로 수행한다.
+    -- DB 의 정렬이 기본 collation(문자 가중치 기반)이면 Java 의 코드포인트 순서와 어긋나,
+    -- 경계가 틀어지면서 행이 스킵되거나 중복될 수 있다.
+    -- COLLATE "C" 는 바이트 순서라 ASCII ID 에서 Java 비교와 정확히 일치한다.
+    -- 부수 효과로 문자열 인덱스 비교도 빨라진다.
+
     -- users: 멤버십 등급(user_grade)은 SCD Type 2 이력 관리 타겟
     CREATE TABLE users (
-        user_id         VARCHAR PRIMARY KEY,
+        user_id         VARCHAR COLLATE "C" PRIMARY KEY,
         user_name       VARCHAR NOT NULL,
         email           VARCHAR NOT NULL UNIQUE,
         birth_year      INTEGER,
@@ -16,7 +25,7 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
 
     -- merchants: 입점 판매자 (정산 대금 청구 주체)
     CREATE TABLE merchants (
-        merchant_id     VARCHAR PRIMARY KEY,
+        merchant_id     VARCHAR COLLATE "C" PRIMARY KEY,
         merchant_name   VARCHAR NOT NULL,
         business_number VARCHAR NOT NULL UNIQUE,
         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -25,8 +34,8 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
 
     -- products: category는 DW 범주화/클러스터링 타겟
     CREATE TABLE products (
-        product_id      VARCHAR PRIMARY KEY,
-        merchant_id     VARCHAR NOT NULL REFERENCES merchants (merchant_id),
+        product_id      VARCHAR COLLATE "C" PRIMARY KEY,
+        merchant_id     VARCHAR COLLATE "C" NOT NULL REFERENCES merchants (merchant_id),
         product_name    VARCHAR NOT NULL,
         category        VARCHAR,
         price           INTEGER NOT NULL,
@@ -37,8 +46,8 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
 
     -- transactions: status 변경은 CDC 캡처 대상
     CREATE TABLE transactions (
-        transaction_id  VARCHAR PRIMARY KEY,
-        user_id         VARCHAR NOT NULL REFERENCES users (user_id),
+        transaction_id  VARCHAR COLLATE "C" PRIMARY KEY,
+        user_id         VARCHAR COLLATE "C" NOT NULL REFERENCES users (user_id),
         total_amount    INTEGER NOT NULL,
         status          VARCHAR NOT NULL
             CHECK (status IN ('PENDING', 'SUCCESS', 'REFUND', 'FAILED', 'CANCELLED')),
@@ -49,9 +58,9 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
     -- transaction_items: 결제 시점 단가 스냅샷 + 수수료 안분
     -- DW 정산 지급액 = item_amount - pg_fee - platform_fee
     CREATE TABLE transaction_items (
-        item_id         VARCHAR PRIMARY KEY,
-        transaction_id  VARCHAR NOT NULL REFERENCES transactions (transaction_id),
-        product_id      VARCHAR NOT NULL REFERENCES products (product_id),
+        item_id         VARCHAR COLLATE "C" PRIMARY KEY,
+        transaction_id  VARCHAR COLLATE "C" NOT NULL REFERENCES transactions (transaction_id),
+        product_id      VARCHAR COLLATE "C" NOT NULL REFERENCES products (product_id),
         unit_price      INTEGER NOT NULL,
         quantity        INTEGER NOT NULL,
         item_amount     INTEGER NOT NULL,
@@ -61,10 +70,13 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
 
     -- CDC 인프라 테이블. 비즈니스 데이터가 아니므로 DW 적재 대상에서 제외한다.
     --
-    -- debezium_signal: ad-hoc/incremental snapshot 신호. Debezium 이 스냅샷 chunk 경계마다
-    -- 이 테이블에 watermark 를 써서 스트림에 끼워 넣으므로 publication 에 포함되어야 한다.
+    -- debezium_signal: ad-hoc/incremental snapshot 신호. Debezium 이 chunk 경계마다
+    -- 이 테이블에 watermark 를 써서 스트림에 끼워 넣으므로 publication 에는 반드시 포함되어야 한다.
+    -- 반면 table.include.list 에는 넣지 않는다. include.list 는 디코딩된 이벤트에 적용되는
+    -- 커넥터 레벨 필터이고, watermark 는 그 필터보다 앞에서 내부적으로 소비된다.
+    -- 즉 publication 에만 있으면 스냅샷은 정상 동작하고 Kafka 발행은 일어나지 않는다.
     CREATE TABLE debezium_signal (
-        id      VARCHAR(42) PRIMARY KEY,
+        id      VARCHAR(42) COLLATE "C" PRIMARY KEY,
         type    VARCHAR(32) NOT NULL,
         data    VARCHAR(2048)
     );

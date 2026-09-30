@@ -38,19 +38,6 @@ const ORDER = [
 export default function () {
     const state = createVuState('smoke');
 
-    // 가장 중요한 전제 검증.
-    // xk6-sql 의 Database 는 커넥션 풀이고 트랜잭션 API 가 없다. BEGIN 을 따로 보내면
-    // 이후 문장이 다른 커넥션으로 갈 수 있고, 그러면 트랜잭션이 조용히 깨진다.
-    // 같은 트랜잭션 안이라면 txid_current() 가 두 번 다 같은 값이어야 한다.
-    db.exec('BEGIN');
-    const firstTxid = String(db.query('SELECT txid_current() AS txid')[0].txid);
-    const secondTxid = String(db.query('SELECT txid_current() AS txid')[0].txid);
-    db.exec('COMMIT');
-    console.log(`txid probe: ${firstTxid} / ${secondTxid}`);
-    check(null, {
-        'statements stay on one connection inside BEGIN': () => firstTxid === secondTxid,
-    });
-
     for (const op of ORDER) {
         const result = HANDLERS[op](state);
         console.log(`${op}: ${result}`);
