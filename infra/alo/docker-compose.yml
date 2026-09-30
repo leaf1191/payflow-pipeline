@@ -49,15 +49,20 @@ services:
       - random_page_cost=1.1
       - -c
       - synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}
-      # Debezium 을 kill 해 둔 동안 복제 슬롯이 WAL 을 붙잡아 디스크를 채우는 것을 막는다.
-      # 한도를 넘으면 슬롯이 invalidated 되고 오래된 WAL 부터 지워진다.
-      # 슬롯이 죽으면 CDC 재개가 불가능하므로, 이 값에 걸렸다는 건 그 실험이 실패했다는 뜻이다.
+      # OLTP 가용성 우선. 복제 슬롯이 이 한도 이상 WAL 을 붙잡으면 슬롯을 버리고 WAL 을 지운다.
+      # Debezium 이 죽어 있는 동안 디스크가 차서 원천 DB 가 멈추는 것보다는 낫다는 선택이다.
+      # 대가: 슬롯이 invalidated 되면 CDC 재개가 불가능해 스냅샷을 다시 떠야 한다.
       - -c
       - max_slot_wal_keep_size=${POSTGRES_MAX_SLOT_WAL_KEEP_SIZE:-8GB}
-      # 트랜잭션을 열어둔 채 죽은 세션이 WAL·락을 붙잡지 못하게 한다.
-      # statement_timeout 은 전역으로 걸지 않는다. Debezium 초기 스냅샷의 대량 SELECT 가 죽는다.
+      # 타임아웃은 전역으로만 건다. 세션별로 덮어쓰면 전역값이 적용되는 세션이 없어 의미가 없다.
+      # incremental snapshot 은 chunk(1024행) 단위라 statement_timeout 에 걸리지 않는다.
+      # 예외는 verify.sql 의 대량 집계뿐이고, 그 파일이 스스로 statement_timeout=0 으로 푼다.
       - -c
-      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TX_TIMEOUT:-300s}
+      - statement_timeout=${POSTGRES_STATEMENT_TIMEOUT:-30s}
+      - -c
+      - lock_timeout=${POSTGRES_LOCK_TIMEOUT:-5s}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TX_TIMEOUT:-60s}
     shm_size: 512m
     volumes:
       - postgres_data:/var/lib/postgresql/data

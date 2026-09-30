@@ -5,6 +5,10 @@
 --
 --   psql -v ON_ERROR_STOP=1 -h <host> -U app -d app -f k6/sql/verify.sql
 
+-- 서버 전역 statement_timeout(기본 30s)은 OLTP 문장을 보호하기 위한 값이다.
+-- 아래 전수 집계는 그보다 오래 걸릴 수 있으므로 이 세션에서만 푼다.
+SET statement_timeout = 0;
+
 \echo '== row counts =='
 SELECT
     (SELECT count(*) FROM users)             AS users,
@@ -43,6 +47,15 @@ SELECT count(*) AS mismatched_transactions
            SELECT COALESCE(sum(i.item_amount), 0)
              FROM transaction_items i
             WHERE i.transaction_id = t.transaction_id);
+
+-- k6 는 BEGIN/COMMIT 으로 transactions 와 items 를 한 트랜잭션에 묶는다.
+-- 커넥션 풀이 문장마다 다른 커넥션을 줬다면 BEGIN 이 무효화되어 각 INSERT 가 autocommit 되고,
+-- 그 경우 items 없는 transactions 행이 남는다. 즉 이 값은 트랜잭션 경계가 성립했다는 증거다.
+\echo '== atomicity: transactions without any item (must be 0) =='
+SELECT count(*) AS orphan_transactions
+  FROM transactions t
+ WHERE NOT EXISTS (
+           SELECT 1 FROM transaction_items i WHERE i.transaction_id = t.transaction_id);
 
 \echo '== integrity: items referencing a product that no longer exists (must be 0) =='
 SELECT count(*) AS orphan_items

@@ -59,6 +59,25 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         platform_fee    INTEGER NOT NULL DEFAULT 0
     );
 
+    -- CDC 인프라 테이블. 비즈니스 데이터가 아니므로 DW 적재 대상에서 제외한다.
+    --
+    -- debezium_signal: ad-hoc/incremental snapshot 신호. Debezium 이 스냅샷 chunk 경계마다
+    -- 이 테이블에 watermark 를 써서 스트림에 끼워 넣으므로 publication 에 포함되어야 한다.
+    CREATE TABLE debezium_signal (
+        id      VARCHAR(42) PRIMARY KEY,
+        type    VARCHAR(32) NOT NULL,
+        data    VARCHAR(2048)
+    );
+
+    -- debezium_heartbeat: heartbeat.action.query 가 주기적으로 갱신한다.
+    -- 캡처 대상 테이블이 한산할 때도 WAL 에 변경을 만들어 복제 슬롯의 confirmed_flush_lsn 을
+    -- 전진시키는 것이 목적이다. 이것 없이는 다른 슬롯이나 저트래픽 구간에서 WAL 이 계속 쌓인다.
+    CREATE TABLE debezium_heartbeat (
+        id           INTEGER PRIMARY KEY,
+        connector    VARCHAR NOT NULL,
+        heartbeat_ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE INDEX idx_products_merchant_id ON products (merchant_id);
     CREATE INDEX idx_products_category ON products (category);
     CREATE INDEX idx_transactions_user_id ON transactions (user_id);
@@ -75,5 +94,12 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         merchants,
         products,
         transactions,
-        transaction_items;
+        transaction_items,
+        debezium_signal,
+        debezium_heartbeat;
+
+    -- Debezium 은 읽기 전용이지만 이 두 테이블에는 써야 한다.
+    -- signal: 스냅샷 watermark 기록, heartbeat: 슬롯 전진용 더미 변경.
+    GRANT SELECT, INSERT, UPDATE, DELETE ON debezium_signal TO ${DEBEZIUM_USER};
+    GRANT SELECT, INSERT, UPDATE ON debezium_heartbeat TO ${DEBEZIUM_USER};
 EOSQL

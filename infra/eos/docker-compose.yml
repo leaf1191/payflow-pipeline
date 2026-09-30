@@ -56,7 +56,11 @@ services:
       - -c
       - max_slot_wal_keep_size=${POSTGRES_MAX_SLOT_WAL_KEEP_SIZE:-8GB}
       - -c
-      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TX_TIMEOUT:-300s}
+      - statement_timeout=${POSTGRES_STATEMENT_TIMEOUT:-30s}
+      - -c
+      - lock_timeout=${POSTGRES_LOCK_TIMEOUT:-5s}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TX_TIMEOUT:-60s}
     shm_size: 512m
     volumes:
       - postgres_data:/var/lib/postgresql/data

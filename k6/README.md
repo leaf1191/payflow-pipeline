@@ -26,8 +26,11 @@ cp .env.example .env            # 접속 정보, 원천 데이터 규모, 부하
 docker compose --profile load build
 
 # (CSV 시드 주입은 별도 스크립트로 선행)
+# 커넥터는 snapshot.mode=no_data 라 기동만으로는 기준 데이터를 읽지 않는다.
+# 시드를 DW 로 넘기려면 incremental snapshot 신호를 한 번 넣는다.
+psql -h <PG_HOST> -U app -d app -f ../infra/postgres/snapshot.sql
 
-./run.sh smoke                  # SQL 검증
+./run.sh smoke                  # SQL 검증 + 트랜잭션 경계 검증
 ./run.sh transaction_load       # 본 부하
 psql -h <PG_HOST> -U app -d app -f sql/verify.sql
 ```
@@ -62,8 +65,12 @@ VU 는 상한(기본 100)으로만 두고 실제 부하는 TPS 로 제어한다(
 | base 복귀 | 1000 | 1m + 3m |
 | drain | 0 | 30s |
 
-1 TPS = 1 iteration = SQL 한 문장이다. 다만 k6 가 보낸 목표와 DB 가 실제로 처리한 양은 다르다.
-**실측값은 Grafana 를 본다.**
+1 TPS = 1 iteration 이다. 다만 결제 계열 iteration 은 SQL 5회 왕복(`BEGIN` ~ `COMMIT`)이므로
+k6 가 보낸 목표와 DB 가 실제로 처리한 양은 다르다. **실측값은 Grafana 를 본다.**
+
+왕복이 5회라는 점은 달성 가능한 TPS 상한을 좌우한다. RTT 가 붙는 원격에서 돌리면
+`VUS × (1 / (5 × RTT))` 가 천장이 된다. 피크 5000 TPS 를 노린다면 k6 를 DB 와 같은 VPC 안에서
+돌려야 하고, 로컬에서 돌리는 검증용 실행은 애초에 낮은 TPS 를 전제로 한다.
 
 ## 시나리오와 기본 가중치
 
@@ -86,11 +93,20 @@ VU 는 상한(기본 100)으로만 두고 실제 부하는 TPS 로 제어한다(
   생기고, soft delete 가 누적되면 살아있는 후보가 말라 결제가 성립하지 않는다.
   상인으로 범위를 좁히면 나오는 건 전부 살아있는 상품이고, 카탈로그를 무한히 늘릴 수 있다.
   `ORDER BY random()` 이 훑는 범위도 한 상인의 상품(수십 건)으로 한정된다.
-- **결제는 조회부터 삽입까지 한 문장이다.** 상인 조회 → 상품 선택 → `transactions` → `transaction_items`
-  를 data-modifying CTE 하나로 묶는다. 조회와 삽입을 따로 보내면 그 사이에 상품이 soft delete 될 수
-  있지만, 한 문장은 단일 스냅샷 위에서 실행되므로 그 창이 없다. 왕복도 1회다.
-  `BEGIN`/`COMMIT` 을 따로 보내지 않는 이유이기도 하다. 커넥션 풀이 문장마다 다른 커넥션을 줄 수 있다.
-  살아있는 상품이 하나도 없으면 `HAVING count(*) > 0` 이 막아 결제 자체가 생기지 않는다.
+- **결제는 명시적 트랜잭션으로 다섯 왕복에 나눈다.**
+  `BEGIN` → `SELECT`(상인의 상품) → `INSERT transactions` → `INSERT transaction_items` → `COMMIT`.
+  한 문장으로 합치면 성능은 좋지만 두 가지를 잃는다.
+  첫째, 트랜잭션이 여러 왕복에 걸쳐 열려 있어야 여러 VU 의 LSN 구간이 실제로 겹친다.
+  `txA(100~300)` 안에 `txB(200~250)` 가 끼고, Debezium 은 이걸 커밋 순서로 재정렬해 내보낸다.
+  LSN 순서와 CDC 출력 순서가 어긋나는 이 상태가 Snowflake `MERGE` 가 실제로 견뎌야 하는 조건이다.
+  둘째, 수량·금액·수수료·오염값을 JS 가 만든다. `random()` 과 산술을 SQL 에 넣으면
+  부하 발생기의 연산이 측정 대상인 DB 의 CPU 를 먹는다.
+  상품 조회는 트랜잭션 안에서 하므로 잡힌 목록은 `COMMIT` 까지 같은 스냅샷으로 유지된다.
+  실패하면 반드시 `ROLLBACK` 을 보낸다. 안 보내면 그 커넥션이 aborted 상태로 남아 이후 전부 실패한다.
+- **트랜잭션 경계는 검증 대상이다.** xk6-sql 의 `Database` 는 커넥션 풀이고 트랜잭션 API 가 없다.
+  `BEGIN` 을 따로 보낸 뒤 다음 문장이 다른 커넥션으로 가면 트랜잭션이 **조용히** 깨진다.
+  `smoke.js` 가 `BEGIN` 안에서 `txid_current()` 를 두 번 읽어 같은 값인지 확인하고,
+  `verify.sql` 은 items 없는 transactions 행이 0인지 확인한다. 두 번째가 사후 탐지 수단이다.
 - **환불은 유저에서 출발한다.** 실제 환불 요청의 진입 경로와 같고 `(user_id, status)` 인덱스를 탄다.
   같은 유저를 동시에 고른 VU 와 부딪히지 않도록 `FOR UPDATE SKIP LOCKED` 로 비켜 간다.
 - **PENDING 상태 변경만 VU 로컬 큐를 쓴다.** `status='PENDING'` 을 DB 에서 찾으면 수천 TPS 를 못 낸다.
@@ -141,21 +157,28 @@ max_slot_wal_keep_size=8GB  idle_in_transaction_session_timeout=300s
 `synchronous_commit` 은 기본 `on` 이다. 유실 0건을 증명하는 실험이므로 커밋 내구성을 끄면 안 된다.
 순수 TPS 상한만 재볼 때에 한해 `POSTGRES_SYNCHRONOUS_COMMIT=off` 를 쓴다.
 
-### WAL 폭주 방어
+### WAL 폭주 방어와 슬롯 전진
 
-Debezium 을 kill 해 두면 복제 슬롯이 WAL 을 붙잡고 놓지 않는다. 그대로 두면 디스크가 찬다.
-`max_slot_wal_keep_size` 가 그 상한이고, 넘으면 슬롯이 invalidated 되면서 오래된 WAL 부터 지워진다.
-
-여기에는 함정이 있다. **슬롯이 invalidated 되면 Debezium 은 재개할 수 없고 스냅샷을 다시 떠야 한다.**
-즉 이 설정은 디스크를 살리는 대신 유실 0건 검증을 포기하는 스위치다.
-계획한 다운타임 동안 쌓일 WAL 보다 반드시 크게 잡아야 하고, 실제로 걸렸다면 그 실험은 무효다.
-기준: 5000 TPS 로 3분이면 `wal_compression=on` 에서 대략 300MB 안팎이므로 8GB 는 충분히 여유롭다.
+WAL 은 **가장 뒤처진 복제 슬롯** 기준으로 보존된다. Debezium 이 죽어 있으면 그 슬롯이 전진하지
+않아 WAL 이 쌓이고, 디스크가 차면 원천 DB 가 멈춘다. OLTP 가용성이 우선이므로
+`max_slot_wal_keep_size` 를 넘기면 슬롯을 버리고 WAL 을 회수한다.
+대가는 분명하다. **슬롯이 invalidated 되면 CDC 를 재개할 수 없어 스냅샷을 다시 떠야 한다.**
+5000 TPS 로 3분이면 `wal_compression=on` 에서 대략 300MB 안팎이라 8GB 는 충분히 여유롭다.
 진행 상황은 Grafana `Replication Slot Retained WAL` 패널로 본다.
 
-타임아웃은 두 층으로 나눠 걸었다. `statement_timeout` 을 전역으로 걸면
-Debezium 초기 스냅샷의 대량 `SELECT` 가 죽으므로, k6 접속 문자열의 `options` 로 세션에만 건다
-(`PG_STATEMENT_TIMEOUT_MS`, `PG_LOCK_TIMEOUT_MS`, `PG_IDLE_IN_TX_TIMEOUT_MS`).
-전역에는 죽은 세션이 WAL·락을 붙잡는 것만 막는 `idle_in_transaction_session_timeout=300s` 를 둔다.
+Debezium 이 살아 있어도 슬롯이 멈출 수 있다. 캡처 대상 테이블에 변경이 없는 구간이나,
+다른 슬롯이 한산해서 전진하지 않는 경우다. 그래서 두 가지를 같이 건다.
+
+- `heartbeat.interval.ms=10000` — 처리한 WAL 오프셋을 주기적으로 ack 한다.
+- `heartbeat.action.query` — `debezium_heartbeat` 테이블을 갱신해 WAL 에 실제 변경을 만든다.
+  오프셋 ack 만으로는 부족한 상황(다른 DB·다른 슬롯만 바쁜 경우)을 위한 것이고,
+  **이 테이블은 publication 에 포함되어야 동작한다.**
+
+타임아웃은 전역으로만 건다(`statement_timeout=30s`, `lock_timeout=5s`,
+`idle_in_transaction_session_timeout=60s`). 세션에서 덮어쓰면 전역값이 적용될 세션이 없어
+아무 의미가 없기 때문이다. 전역으로 걸 수 있는 건 초기 스냅샷을 incremental snapshot 으로
+바꿨기 때문이다. chunk 가 1024행이라 문장 하나가 짧다. 예외는 `sql/verify.sql` 의 전수 집계뿐이고,
+그 파일이 스스로 `SET statement_timeout = 0` 으로 푼다.
 
 t3.large(2 vCPU)에 postgres + kafka + connect 2대를 같이 올린 개발 구성에서는 5000 TPS 가 나오지 않는다.
 `PEAK_TPS` 를 고정한 채 실측 commit rate 와 `dropped_iterations` 를 같이 보면 그 지점이 곧 한계치다.

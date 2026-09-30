@@ -24,10 +24,6 @@ export const PG = {
     password: str('POSTGRES_PASSWORD', 'change-me'),
     database: str('POSTGRES_DB', 'app'),
     sslmode: str('POSTGRES_SSLMODE', 'disable'),
-    // k6 세션에만 거는 안전장치. 전역으로 걸면 Debezium 초기 스냅샷의 대량 SELECT 가 죽는다.
-    statementTimeoutMs: num('PG_STATEMENT_TIMEOUT_MS', 30000),
-    lockTimeoutMs: num('PG_LOCK_TIMEOUT_MS', 5000),
-    idleInTxTimeoutMs: num('PG_IDLE_IN_TX_TIMEOUT_MS', 60000),
 };
 
 // 별도 파이썬 스크립트가 CSV 로 만들어 COPY 로 주입한 기준 데이터의 규모.
@@ -85,13 +81,9 @@ export const BEHAVIOR = {
     statusFailedRatio: num('STATUS_FAILED_RATIO', 12),
 };
 
+// statement_timeout 등은 서버 전역 설정을 그대로 쓴다. 세션에서 덮어쓰지 않는다.
 export function connectionString() {
     const auth = `${encodeURIComponent(PG.user)}:${encodeURIComponent(PG.password)}`;
-    const sessionOptions = encodeURIComponent(
-        `-c statement_timeout=${PG.statementTimeoutMs} ` +
-            `-c lock_timeout=${PG.lockTimeoutMs} ` +
-            `-c idle_in_transaction_session_timeout=${PG.idleInTxTimeoutMs}`
-    );
-    const params = `sslmode=${PG.sslmode}&application_name=k6-load&options=${sessionOptions}`;
+    const params = `sslmode=${PG.sslmode}&application_name=k6-load`;
     return `postgres://${auth}@${PG.host}:${PG.port}/${PG.database}?${params}`;
 }
