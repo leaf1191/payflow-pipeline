@@ -16,19 +16,8 @@ const CATEGORIES = ['FOOD', 'FASHION', 'DIGITAL', 'BEAUTY', 'LIVING', 'SPORTS', 
 const PG_FEE_RATE = 0.025;
 const PLATFORM_FEE_RATE = 0.05;
 
-// CDC 이벤트 식별자용 타임스탬프. epoch 밀리초 정수로 받는다.
-//
-// Debezium 은 Avro 호환성을 위해 Connect 논리 타입(epoch millis)을 쓰므로 parquet 쪽 정밀도가
-// 밀리초다. 여기서 us 까지 받아봐야 비교 시점에 잘려 의미가 없고, date_trunc 로 미리 끊어
-// Debezium 의 절단 방식과 일치시킨다. 그래야 양쪽 값이 정확히 같아진다.
-//
-// 그리고 (pk, updated_at_ms) 만으로는 유일하지 않다. 같은 PK 가 같은 밀리초에 두 번 변경될 수
-// 있다. 그래서 각 UPDATE 는 바뀐 컬럼(after-image)까지 함께 돌려준다.
-// 감사 키는 (op, pk, updated_at_ms, after-image) 다.
-function tsMs(column) {
-    const alias = column.indexOf('.') >= 0 ? column.split('.')[1] : column;
-    return `(extract(epoch from date_trunc('millisecond', ${column})) * 1000)::bigint AS ${alias}_ms`;
-}
+// 감사 키에 시간 컬럼은 들어가지 않는다. 키는 (table, pk, kind) 이고 kind 는 RETURNING 의
+// status 같은 결과 값에서 나온다. 어떤 UPDATE 가 감사 대상이 되는지는 lib/audit.js 참고.
 
 function classify(rows) {
     if (rows === null) {
@@ -120,7 +109,7 @@ function insertPayment(state, corruption) {
                 round(p.item_amount * ${PG_FEE_RATE})::int,
                 round(p.item_amount * ${PLATFORM_FEE_RATE})::int
            FROM priced p CROSS JOIN tx
-         RETURNING item_id`
+         RETURNING item_id, transaction_id`
     );
 
     if (rows === null) {
@@ -141,10 +130,6 @@ export function newPayment(state) {
 }
 
 // 2. 결제 상태 변경 (PENDING → SUCCESS / FAILED / CANCELLED)
-//
-// 감사 키 관점: 대상 PK 를 VU 로컬 링 버퍼에서 꺼내고(takeRandom 은 꺼낸 값을 제거한다)
-// WHERE 에 status='PENDING' 가드가 있다. 그래서 한 PK 에 PENDING→X 전이는 정확히 한 번뿐이고
-// 그 VU 만 건드린다. 같은 PK 가 같은 밀리초에 두 번 나올 수 없다.
 export function statusChange(state) {
     const transactionId = state.pending.takeRandom();
     if (transactionId === null) {
@@ -165,7 +150,7 @@ export function statusChange(state) {
             `UPDATE transactions
                 SET status = $2, updated_at = NOW()
               WHERE transaction_id = $1 AND status = 'PENDING'
-             RETURNING transaction_id, status, ${tsMs('updated_at')}`,
+             RETURNING transaction_id, status`,
             [transactionId, nextStatus]
         )
     );
@@ -175,9 +160,6 @@ export function statusChange(state) {
 // 유저를 먼저 고르고 그 유저의 SUCCESS 결제를 찾는다. 실제 환불 요청의 진입 경로와 같고,
 // (user_id, status) 인덱스를 타므로 전체 스캔이 없다.
 // 동시에 같은 유저를 고른 VU 와 부딪히지 않도록 SKIP LOCKED 로 비켜 간다.
-//
-// 감사 키 관점: status='SUCCESS' 가드가 있고 결과가 REFUND 라 두 번 선택될 수 없다.
-// 한 PK 당 REFUND 이벤트는 최대 한 건이다.
 export function refund() {
     return classify(
         runSql(
@@ -192,7 +174,7 @@ export function refund() {
                      LIMIT 1
                        FOR UPDATE SKIP LOCKED
                 )
-             RETURNING transaction_id, status, ${tsMs('updated_at')}`,
+             RETURNING transaction_id, status`,
             [randomUserId()]
         )
     );
@@ -202,33 +184,35 @@ export function refund() {
 // 상인이 자기 진열대에서 상품 하나를 고르는 흐름. 상인으로 범위를 좁힌 뒤 고르므로
 // ORDER BY random() 이 훑는 건 그 상인의 상품뿐이다.
 //
-// 감사 키 관점: 여기가 유일하게 한 PK 가 여러 번 변경되는 경로다. 그래서 product_name 에
-// state.nextRevision() 토큰을 심는다. (runId, vuId, sequence) 조합이라 전역 유일이고,
-// 그 결과 after-image 가 이벤트마다 반드시 달라진다. 밀리초가 겹쳐도 키가 겹치지 않는다.
-// 이름을 난수나 고정 문자열로 되돌리면 이 보장이 조용히 사라진다.
+// product_name 의 state.nextRevision() 토큰은 (runId, vuId, sequence) 조합이라 전역 유일하다.
+// parquet 의 after 블록만 보고 어느 VU 의 몇 번째 변경인지 짚기 위한 추적용이다.
 //
-// soft delete 쪽은 pickOne 의 deleted_at IS NULL 가드 때문에 한 PK 당 최대 한 건이다.
-export function productUpdate(state) {
-    const merchantId = randomMerchantId();
-    const pickOne = `(
-        SELECT product_id
-          FROM products
-         WHERE merchant_id = $1 AND deleted_at IS NULL
-         ORDER BY random()
-         LIMIT 1
-    )`;
+// soft delete 는 따로 export 한다. 감사 부하(cdc_audit.js)는 한 PK 가 반복 변경되는 이름/가격
+// 경로를 빼고 soft delete 만 쓰기 때문이다. deleted_at IS NULL 가드 덕에 PK 당 최대 1회다.
+const PICK_ALIVE_PRODUCT = `(
+    SELECT product_id
+      FROM products
+     WHERE merchant_id = $1 AND deleted_at IS NULL
+     ORDER BY random()
+     LIMIT 1
+)`;
 
+export function productSoftDelete() {
+    return classify(
+        runSql(
+            'product_soft_delete',
+            `UPDATE products
+                SET deleted_at = NOW(), updated_at = NOW()
+              WHERE product_id = ${PICK_ALIVE_PRODUCT}
+             RETURNING product_id`,
+            [randomMerchantId()]
+        )
+    );
+}
+
+export function productUpdate(state) {
     if (percent(BEHAVIOR.softDeleteRatio)) {
-        return classify(
-            runSql(
-                'product_soft_delete',
-                `UPDATE products
-                    SET deleted_at = NOW(), updated_at = NOW()
-                  WHERE product_id = ${pickOne}
-                 RETURNING product_id, ${tsMs('updated_at')}`,
-                [merchantId]
-            )
-        );
+        return productSoftDelete();
     }
 
     return classify(
@@ -239,9 +223,9 @@ export function productUpdate(state) {
                     category = $3,
                     price = GREATEST(100, (p.price * ${randInt(70, 130)}) / 100),
                     updated_at = NOW()
-              WHERE p.product_id = ${pickOne}
-             RETURNING p.product_id, p.product_name, p.category, p.price, ${tsMs('p.updated_at')}`,
-            [merchantId, `product-${state.nextRevision()}`, pick(CATEGORIES)]
+              WHERE p.product_id = ${PICK_ALIVE_PRODUCT}
+             RETURNING p.product_id, p.product_name, p.category, p.price`,
+            [randomMerchantId(), `product-${state.nextRevision()}`, pick(CATEGORIES)]
         )
     );
 }
@@ -253,20 +237,13 @@ export function productInsert(state) {
             'product_insert',
             `INSERT INTO products (product_id, merchant_id, product_name, category, price)
              VALUES ($1, $2, $3, $4, ${randInt(2, 200) * 500})
-             RETURNING product_id, ${tsMs('created_at')}`,
+             RETURNING product_id`,
             [state.nextProductId(), randomMerchantId(), `product-new-${randInt(1, 999999)}`, pick(CATEGORIES)]
         )
     );
 }
 
 // 6. 유저 멤버십 등급 변경 (승급 75%, 강등 25%, 단계 건너뜀 허용)
-//
-// 감사 키 관점: 여기만 잔여 충돌이 남는다. user_grade 의 값 공간이 4개뿐이라
-// after-image 에 넣을 엔트로피가 없다. 행 락이 직렬화하고 <> 가드가 있으므로 연속한 두 이벤트는
-// 값이 다르지만, 같은 유저에 같은 밀리초 안에서 3번 이상 변경되며 값이 되돌아오는 경우
-// (BRONZE→GOLD→SILVER→GOLD) 1번과 3번의 키가 같아진다.
-// 이 경우에도 비교를 멀티셋 건수(k6 건수 <= S3 건수)로 하면 유실은 여전히 잡힌다.
-// 키가 합쳐져 k6 가 2건으로 세고 S3 가 1건이면 불일치로 드러난다.
 export function gradeChange() {
     const step = randInt(1, 3);
     const delta = percent(75) ? step : -step;
@@ -290,7 +267,7 @@ export function gradeChange() {
               WHERE u.user_id = $1
                 AND u.deleted_at IS NULL
                 AND u.user_grade <> g.next_grade
-             RETURNING u.user_id, u.user_grade, ${tsMs('u.updated_at')}`,
+             RETURNING u.user_id, u.user_grade`,
             [randomUserId()]
         )
     );

@@ -7,14 +7,19 @@ HTTP 계층이 없으므로 `xk6-sql` + postgres 드라이버로 빌드한 커�
 
 ```
 sql/verify.sql                부하 후 원천 DB 최종 상태 (Snowflake 대조용 정답지)
+sql/flush.sql                 S3 sink 의 마지막 파일을 닫는 센티널 주입
 scripts/transaction_load.js   본 부하 (TPS 제어)
+scripts/cdc_audit.js          이벤트 유실 감사용 부하 (감사 키를 NDJSON 으로 기록)
 scripts/smoke.js              8종 SQL 1회씩 실행하는 사전 점검
 scripts/lib/config.js         환경변수 파싱
 scripts/lib/db.js             커넥션 + runSql()
+scripts/lib/audit.js          감사 키 기록기 (기본 비활성)
 scripts/lib/random.js         난수 / 가중치 추첨
 scripts/lib/state.js          VU 로컬 PENDING 큐 + PK 조립
 scripts/lib/scenarios.js      8종 SQL 본체
 ```
+
+S3 대조는 저장소 루트의 `audit/` 에 있다(`run_audit.sh`, `duckdb/init.sql`, `duckdb/audit.sql`).
 
 기준 데이터(users / merchants / products)는 별도 파이썬 스크립트가 CSV 로 만들고
 DB 초기화 때 `COPY` 로 주입한다. k6 쪽에 시드 로직은 없다.
@@ -70,6 +75,9 @@ VU 는 상한(기본 100)으로만 두고 실제 부하는 TPS 로 제어한다(
 | peak 유지 | `PEAK_TPS` (5000) | 2m |
 | base 복귀 | 1000 | 1m + 3m |
 | drain | 0 | 30s |
+
+감사 실행(`cdc_audit`)은 별도 프로파일이다. `AUDIT_TPS`(300), `AUDIT_VUS`(50),
+`AUDIT_DURATION`(10m) 으로 제어하고 `constant-arrival-rate` 를 쓴다.
 
 1 TPS = 1 iteration = SQL 한 문장 = 한 트랜잭션이다. 다만 k6 가 보낸 목표와 DB 가 실제로 처리한
 양은 다르다. **실측값은 Grafana 를 본다.**
@@ -145,40 +153,105 @@ commit rate 가 먼저 꺾이면 DB 가 병목이다.
 `PENDING → SUCCESS → REFUND` 라는 3개의 CDC 이벤트가 있었다는 사실은 이 테이블에 남지 않는다.
 즉 최종 상태가 일치해도 중간 이벤트 유실은 잡히지 않는다.
 
-### 이벤트 단위 감사 키
+### 이벤트 단위 감사
 
-이벤트 전수 검증은 k6 가 기록한 성공 이벤트 집합이 S3 parquet 에 **포함**되는지를 본다.
-단방향인 이유는 커밋은 성공했지만 k6 가 응답을 못 받는 경우가 있어서다. 반대 방향의 초과분은
-ALO 중복이고, 그건 유실이 아니라 별도로 세야 하는 증거다.
+`scripts/cdc_audit.js` 가 성공한 모든 이벤트의 감사 키를 NDJSON 으로 남기고,
+`audit/` 의 DuckDB 질의가 그걸 S3 parquet 과 대조한다.
 
-키는 `(op, pk, updated_at_ms, after-image)` 다. 앞의 셋만으로는 부족하다.
-Debezium 이 Avro 호환성을 위해 Connect 논리 타입(epoch millis)을 쓰므로 parquet 의 시간
-정밀도가 밀리초이고, 같은 PK 가 같은 밀리초에 두 번 변경될 수 있다. us/ns 로 쪼개도 겹칠
-가능성이 남고, 후방 정합은 어차피 커밋 LSN + 트랜잭션 내 LSN(`source.lsn`)을 순서 기준으로
-쓰므로 시간 정밀도를 올릴 이유가 없다.
+```bash
+./run.sh cdc_audit              # 이 사이에 debezium / connect-s3 를 여러 번 kill
+sleep 70 && psql ... -f sql/flush.sql
+../audit/run_audit.sh <RUN_ID>
+```
 
-그래서 바뀐 컬럼 값까지 키에 넣는다. 시나리오별로 유일성 근거가 다르다.
+#### 감사 대상은 유일성이 SQL 로 보장되는 트래픽뿐이다
 
-| 이벤트 | 유일성 근거 |
-| --- | --- |
-| INSERT 전부 | PK 가 k6 생성값이라 그 자체로 유일 |
-| `status_change` | VU 로컬 링 버퍼에서 꺼내 제거 + `status='PENDING'` 가드 → PK 당 1회 |
-| `refund` | `status='SUCCESS'` 가드, 결과가 REFUND → PK 당 최대 1회 |
-| `product_soft_delete` | `deleted_at IS NULL` 가드 → PK 당 최대 1회 |
-| `product_update` | `product_name` 에 `(runId, vuId, sequence)` 토큰을 심어 after-image 가 항상 다름 |
-| `grade_change` | **잔여 충돌 있음** (아래) |
+감사 키는 `(table, pk, kind)` 이고 시간은 들어가지 않는다. 감사 부하는 **한 PK 에 같은 kind 의
+소스 이벤트가 최대 1건** 임이 WHERE 가드로 보장되는 시나리오만 돌린다.
 
-`grade_change` 만 값 공간이 4개뿐이라 심을 엔트로피가 없다. 행 락이 직렬화하고 `<>` 가드가
-있어 연속한 두 이벤트는 값이 다르지만, 같은 유저가 같은 밀리초에 3회 이상 변경되며 값이
-되돌아오면(`BRONZE→GOLD→SILVER→GOLD`) 1번과 3번의 키가 같아진다.
+| 이벤트 | kind | PK 당 1건인 근거 |
+| --- | --- | --- |
+| INSERT 전부 | `insert` | PK 가 k6 생성값 |
+| `status_change` | 결과 status (`SUCCESS`/`FAILED`/`CANCELLED`) | `status='PENDING'` 가드 |
+| `refund` | `REFUND` | `status='SUCCESS'` 가드 |
+| `product_soft_delete` | `soft_delete` | `deleted_at IS NULL` 가드 |
 
-이 잔여 케이스도 비교를 `DISTINCT` 가 아니라 **멀티셋 건수**로 하면 유실은 그대로 잡힌다.
-키가 합쳐져 k6 가 2건으로 세고 S3 가 1건이면 `k6 <= S3` 가 깨진다.
-`DISTINCT` 를 쓰면 양쪽이 똑같이 1건으로 붕괴해서 유실이 감춰지고, ALO 중복 증거까지 사라진다.
+`transactions` 는 한 PK 에 UPDATE 가 두 번(상태 변경, 환불) 올 수 있지만 `after.status` 가
+다르므로 kind 로 갈린다. **`grade_change` 와 `product_update`(이름/가격) 는 감사 부하에서
+뺀다.** 한 PK 가 반복 변경되는 경로라 아래의 조용한 재시도가 같은 PK 에 두 번째 이벤트를
+만들 수 있고, 그러면 S3 의 어떤 이벤트가 k6 의 어떤 기록에 대응하는지 구별할 수 없다.
+이 둘을 빼도 파이프라인에 대한 증명은 약해지지 않는다. Debezium → Kafka → S3 는 이벤트가
+같은 PK 를 반복하는지 알지 못하고, 유실은 이벤트 단위로 일어난다. 빠지는 건 **k6 쪽 장부가
+모호한 트래픽**이지 파이프라인의 어떤 경로가 아니다.
 
-남는 구멍은 같은 키에서 1건 유실과 1건 중복이 정확히 상쇄되는 경우뿐이다. 중복은 커넥터
-재시작 시 오프셋 배치 단위로 발생하므로 하필 그 키, 그 밀리초에서 상쇄될 확률은 무시할 수준이고,
-실제 충돌 키 수는 감사 스크립트가 같이 출력하므로 추측하지 않고 확인할 수 있다.
+키가 곧 소스 이벤트이므로 검사는 **단방향 포함** 하나다. k6 가 기록한 모든 키가 S3 에 1건
+이상 있으면 PASS 다. 건수를 세지 않고 `DISTINCT` 도 필요 없다. 재전송으로 같은 키가 여러
+행이어도 그건 at-least-once 의 증거로 따로 센다.
+
+반대 방향(S3 에만 있는 이벤트)은 보지 않는다. k6 가 응답을 못 받아 기록하지 못한 커밋, 재시도가
+다른 PK 에 남긴 이벤트, 이전 실행의 이벤트가 전부 거기 섞이고, 그 어느 것도 유실이 아니다.
+그래서 **`sql_errors` 는 감사의 유효성과 무관하다.** 에러가 난 문장은 기록되지 않았고,
+기록되지 않은 이벤트는 검증 대상이 아니다. 다만 에러가 많으면 검증 범위가 줄어드니 러너가
+참고용으로 같이 찍는다.
+
+#### database/sql 의 조용한 재시도
+
+`xk6-sql` 의 `query()` 는 `*sql.DB.QueryContext` 를 탄다. 드라이버가 `driver.ErrBadConn` 을
+돌려주면 표준 라이브러리가 같은 문장을 최대 3회까지 다시 보낸다. **커밋은 됐는데 응답만 못
+받은 경우에도** 이 경로를 타므로 원천에 WAL 레코드가 2개 생기고 k6 는 1건으로 센다.
+이 루프를 끄는 설정은 표준 라이브러리에 없고, 재시도가 없는 `*sql.Conn` / `*sql.Tx` 는
+xk6-sql 이 JS 로 노출하지 않는다(`open`/`query`/`exec`/`close` 뿐).
+
+막을 수 없으므로 **영향을 받지 않게 설계한다.** 감사 대상 트래픽에서 재시도의 두 번째 실행은
+가드에 막혀 0건이거나(`status_change`) 다른 PK 를 다시 고른다(`refund`, `soft_delete`).
+INSERT 는 PK 충돌로 에러가 난다. 어느 경우에도 이미 기록된 키에 두 번째 이벤트가 생기지
+않으므로 포함 검사의 결과가 바뀌지 않는다.
+
+#### 왜 LSN 으로 세지 않는가
+
+유일성 트래픽으로 한정하지 않고 `(pk, updated_at)` 키 안에서 `count(DISTINCT lsn)` 과 k6
+건수를 등호로 비교하는 방식도 있었다. 재시도 이벤트가 유실된 이벤트와 같은 키 그룹에
+떨어지면 `1 == 1` 로 통과하는 구멍이 있다. 발생 조건이 세 겹(재시도 ∧ 같은 시각 ∧ 그 중
+하나 유실)이라 확률은 극히 낮지만 구조적 보장이 아니다. 지금 방식은 그 경우 자체가 성립하지
+않는다.
+
+#### 감사 전용 스크립트를 따로 둔 이유
+
+기록은 매 iteration 마다 stdout 쓰기를 동반한다. 그걸 `transaction_load.js` 에 섞으면
+측정하려던 대상이 아니라 로거 처리량을 재게 된다. 그래서 둘을 나눴다.
+
+| | `transaction_load.js` | `cdc_audit.js` |
+| --- | --- | --- |
+| 목적 | 처리량·백프레셔 측정 | 이벤트 유실 0건 증명 |
+| TPS | 1000~5000 (`BASE_TPS`/`PEAK_TPS`) | 300 (`AUDIT_TPS`) |
+| 시나리오 | 8종 전부 | `grade_change` 제외, `product_update` 는 soft delete 만 |
+| 키 기록 | 없음 | `--console-output` 으로 NDJSON |
+| `sql_errors` | 측정 무효 | 검증 범위만 감소 |
+
+`lib/audit.js` 는 기본이 꺼져 있고 `cdc_audit.js` 의 init 컨텍스트에서만 켜진다.
+본 부하에서 `runSql` 이 치르는 비용은 boolean 검사 한 번이다. 감사 대상이 아닌 op 가
+기록기에 들어오면 던져서 멈춘다. 조용히 넘기면 검증 범위가 줄어든 채 PASS 가 찍히기 때문이다.
+
+#### 시간 컬럼이 TIMESTAMP(without tz) 인 이유
+
+Debezium 은 `TIMESTAMPTZ` 를 `time.precision.mode` 와 무관하게 `io.debezium.time.ZonedTimestamp`,
+즉 ISO-8601 문자열로 내보낸다. `connect` 모드를 고른 의도는 parquet 에 int64 epoch millis
+컬럼을 받는 것인데 `TIMESTAMPTZ` 면 그 설정이 공문이 되고 후방이 문자열을 다시 파싱해야 한다.
+`TIMESTAMP` 는 `connect` 모드에서 Kafka Connect `Timestamp`(int64 ms) 로 나간다.
+후방은 순서를 LSN 으로 잡으므로 ms 로 충분하다.
+
+전제가 하나 생긴다. `NOW()` 는 timestamptz 를 돌려주고 `TIMESTAMP` 컬럼에 들어갈 때 세션
+타임존으로 변환되는데 Debezium 은 그 값을 UTC 로 해석한다. 그래서 compose 에서
+`-c timezone=UTC` 로 서버 타임존을 고정했다. 감사 키에는 시간이 없으므로 이 결정은 감사와
+독립이다.
+
+#### 출력 읽는 법
+
+`coverage` 표의 `missing` 이 이 실험이 찾는 유실이다. `at-least-once` 표의 `redelivered` 는
+이번 실행의 키에 한정해 센 재전송 행 수로, 0 이면 재전송이 실제로 발동하지 않은 것이라
+중복 제거를 증명했다고 말할 수 없다. kill 횟수와 `redelivered` 가 같이 올라가는 그림이
+핵심 증거다. `keys_with_multiple_lsn` 과 `duplicate keys on the k6 side` 는 둘 다 0 이어야 한다.
+0 이 아니면 "PK 당 1건" 가드가 깨졌거나 감사 대상이 아닌 트래픽이 섞인 것이다.
 
 ## Postgres 수용량
 

@@ -54,6 +54,16 @@ export const LOAD = {
     drainDuration: str('DRAIN_DURATION', '30s'),
 };
 
+// 이벤트 단위 감사 전용 프로파일(scripts/cdc_audit.js).
+// 본 부하와 목적이 다르다. 여기서는 처리량이 아니라 "모든 성공 이벤트를 빠짐없이 기록하는 것"이
+// 목적이고, 기록은 stdout 쓰기를 동반하므로 TPS 를 낮춰 잡는다.
+// 길이는 커넥터를 여러 번 죽였다 살릴 시간을 벌 수 있게 본 부하보다 길다.
+export const AUDIT = {
+    vus: num('AUDIT_VUS', 50),
+    tps: num('AUDIT_TPS', 300),
+    duration: str('AUDIT_DURATION', '10m'),
+};
+
 // 상대 가중치. 합이 100 일 필요는 없다.
 // 결제 생성이 후속 시나리오(상태 변경·환불)의 재고를 만들어주므로 가장 높게 둔다.
 export const WEIGHTS = {

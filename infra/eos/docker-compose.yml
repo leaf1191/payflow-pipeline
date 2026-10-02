@@ -25,6 +25,10 @@ services:
     # ALO 와 동일한 원천 DB 조건에서 비교해야 하므로 튜닝 값도 같게 유지한다.
     command:
       - postgres
+      # 시간 컬럼이 TIMESTAMP(without tz) 라 NOW() 저장값이 세션 타임존을 따른다.
+      # Debezium 은 그 값을 UTC 로 해석하므로 서버 타임존을 UTC 로 고정한다. 02-schema.sh 참고.
+      - -c
+      - timezone=UTC
       - -c
       - wal_level=logical
       - -c

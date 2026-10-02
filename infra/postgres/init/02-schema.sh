@@ -10,6 +10,18 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
     -- 경계가 틀어지면서 행이 스킵되거나 중복될 수 있다.
     -- COLLATE "C" 는 바이트 순서라 ASCII ID 에서 Java 비교와 정확히 일치한다.
     -- 부수 효과로 문자열 인덱스 비교도 빨라진다.
+    --
+    -- 시간 컬럼은 TIMESTAMPTZ 가 아니라 TIMESTAMP(without time zone) 다.
+    --
+    -- Debezium 은 TIMESTAMPTZ 를 time.precision.mode 와 무관하게 io.debezium.time.ZonedTimestamp,
+    -- 즉 ISO-8601 문자열로 내보낸다. 그러면 connect 모드를 고른 의도(parquet 에 int64 epoch
+    -- millis 컬럼을 받는 것)가 무시되고 후방이 문자열을 다시 파싱해야 한다. TIMESTAMP 는
+    -- connect 모드에서 Kafka Connect Timestamp(int64 ms) 로 나간다. 후방은 순서를 LSN 으로
+    -- 잡으므로 ms 정밀도로 충분하다.
+    --
+    -- 전제: 서버 timezone 이 UTC 로 고정되어야 한다(docker-compose 의 -c timezone=UTC).
+    -- NOW() 는 timestamptz 를 돌려주고 TIMESTAMP 컬럼에 들어갈 때 세션 타임존으로 변환되는데,
+    -- Debezium 은 그 값을 UTC 로 해석한다. 세션 타임존이 UTC 가 아니면 저장값이 통째로 어긋난다.
 
     -- users: 멤버십 등급(user_grade)은 SCD Type 2 이력 관리 타겟
     CREATE TABLE users (
@@ -18,9 +30,9 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         email           VARCHAR NOT NULL UNIQUE,
         birth_year      INTEGER,
         user_grade      VARCHAR NOT NULL,
-        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        deleted_at      TIMESTAMPTZ
+        created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        deleted_at      TIMESTAMP
     );
 
     -- merchants: 입점 판매자 (정산 대금 청구 주체)
@@ -28,8 +40,8 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         merchant_id     VARCHAR COLLATE "C" PRIMARY KEY,
         merchant_name   VARCHAR NOT NULL,
         business_number VARCHAR NOT NULL UNIQUE,
-        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        deleted_at      TIMESTAMPTZ
+        created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        deleted_at      TIMESTAMP
     );
 
     -- products: category는 DW 범주화/클러스터링 타겟
@@ -39,9 +51,9 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         product_name    VARCHAR NOT NULL,
         category        VARCHAR,
         price           INTEGER NOT NULL,
-        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        deleted_at      TIMESTAMPTZ
+        created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        deleted_at      TIMESTAMP
     );
 
     -- transactions: status 변경은 CDC 캡처 대상
@@ -51,8 +63,8 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
         total_amount    INTEGER NOT NULL,
         status          VARCHAR NOT NULL
             CHECK (status IN ('PENDING', 'SUCCESS', 'REFUND', 'FAILED', 'CANCELLED')),
-        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     -- transaction_items: 결제 시점 단가 스냅샷 + 수수료 안분
@@ -87,7 +99,7 @@ psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" 
     CREATE TABLE debezium_heartbeat (
         id           INTEGER PRIMARY KEY,
         connector    VARCHAR NOT NULL,
-        heartbeat_ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        heartbeat_ts TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     CREATE INDEX idx_products_merchant_id ON products (merchant_id);
